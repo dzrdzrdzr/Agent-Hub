@@ -5,6 +5,7 @@ import sys
 import uuid
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
@@ -24,6 +25,11 @@ class ClineResult:
     TIMED_OUT = "TIMED_OUT"
 
 
+
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
 
 
 class MockClineExecutor:
@@ -122,18 +128,14 @@ class ClineExecutor:
         cmd = self._build_cmd(cline_path, cwd, prompt_file, stdout_path, stderr_path)
         env = self._build_env(task_id, run_id)
 
-        # Open log files
-        stdout_f = open(stdout_path, "w", encoding="utf-8")
-        stderr_f = open(stderr_path, "w", encoding="utf-8")
-
         logger.info(f"Spawning Cline: {' '.join(cmd)} (task={task_id}, run={run_id})")
 
-        # Spawn async subprocess
+        # Spawn async subprocess with PIPE to filter ANSI codes
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
-            stdout=stdout_f,
-            stderr=stderr_f,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
         )
@@ -145,6 +147,19 @@ class ClineExecutor:
             process.stdin.close()
 
         self._processes[task_id] = process
+
+        # Start pipe readers to filter ANSI and write to log files
+        async def _read_pipe(stream, log_path, task_id):
+            with open(log_path, "w", encoding="utf-8") as lf:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    lf.write(_strip_ansi(line.decode("utf-8", errors="replace")))
+                    lf.flush()
+
+        asyncio.create_task(_read_pipe(process.stdout, stdout_path, task_id))
+        asyncio.create_task(_read_pipe(process.stderr, stderr_path, task_id))
 
         # Capture process identity
         try:
@@ -171,7 +186,7 @@ class ClineExecutor:
             self.task_manager.db.update_task_field(task_id, **proc_info)
 
         # Register exit handler (non-blocking)
-        exit_task = asyncio.create_task(self._wait_exit(task_id, process, stdout_f, stderr_f))
+        exit_task = asyncio.create_task(self._wait_exit(task_id, process))
         self._running[task_id] = exit_task
 
         # Start stall monitor
@@ -181,16 +196,13 @@ class ClineExecutor:
         logger.info(f"Cline spawned: PID={process.pid}, task={task_id}, run={run_id}")
         return run_id, proc_info
 
-    async def _wait_exit(self, task_id: str, process, stdout_f, stderr_f):
+    async def _wait_exit(self, task_id: str, process, stdout_f=None, stderr_f=None):
         """Wait for Cline to exit, then classify result."""
         try:
             exit_code = await process.wait()
         except Exception as e:
             logger.error(f"Error waiting for Cline {task_id}: {e}")
             exit_code = -1
-        finally:
-            stdout_f.close()
-            stderr_f.close()
 
         # Cancel stall monitor
         stall_task = self._stall_tasks.pop(task_id, None)
