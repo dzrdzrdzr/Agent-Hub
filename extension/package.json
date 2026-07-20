@@ -3,33 +3,33 @@
   "displayName": "GAUSS Agent Control Center",
   "version": "0.1.0",
   "publisher": "gauss",
-  "engines": {
-    "vscode": "^1.85.0"
-  },
+  "engines": { "vscode": "^1.85.0" },
   "extensionKind": ["workspace"],
-  "activationEvents": [
-    "onCommand:gauss-agent.submitTask",
-    "onCommand:gauss-agent.showOverview",
-    "onView:gauss-agent.overview"
-  ],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {"command": "gauss-agent.submitTask", "title": "GAUSS: Submit Task"},
-      {"command": "gauss-agent.showOverview", "title": "GAUSS: Show Overview"},
-      {"command": "gauss-agent.cancelTask", "title": "GAUSS: Cancel Task"},
-      {"command": "gauss-agent.refreshStatus", "title": "GAUSS: Refresh Status"}
+      {"command": "gauss-agent.submitTask", "title": "GAUSS: Submit Task", "icon": "$(add)"},
+      {"command": "gauss-agent.cancelTask", "title": "GAUSS: Cancel Task", "icon": "$(stop)"},
+      {"command": "gauss-agent.refresh", "title": "GAUSS: Refresh", "icon": "$(refresh)"}
     ],
-    "viewsContainers": {
-      "activitybar": [{
-        "id": "gauss-agent-sidebar",
-        "title": "GAUSS Agent",
-        "icon": "media/icon.svg"
-      }]
+    "menus": {
+      "view/title": [
+        {"command": "gauss-agent.submitTask", "when": "view == gauss-agent.tasks", "group": "navigation"},
+        {"command": "gauss-agent.refresh", "when": "view == gauss-agent.tasks", "group": "navigation"}
+      ],
+      "view/item/context": [
+        {"command": "gauss-agent.cancelTask", "when": "view == gauss-agent.tasks"}
+      ]
     },
     "views": {
-      "gauss-agent-sidebar": [
-        {"id": "gauss-agent.overview", "name": "Overview"}
+      "gauss-agent": [
+        {"id": "gauss-agent.tasks", "name": "Tasks", "icon": "media/icon.svg", "contextualTitle": "GAUSS Agent"}
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {"id": "gauss-agent", "title": "GAUSS Agent", "icon": "media/icon.svg"}
       ]
     }
   },
