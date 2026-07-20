@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import psutil
 
-from .config import AgentdConfig, resolve_cline_path, cmd_hash
+from .config import AgentdConfig, resolve_cline_path, cmd_hash, load_cline_extension_config
 
 logger = logging.getLogger(__name__)
 
