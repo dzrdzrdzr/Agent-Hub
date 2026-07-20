@@ -1,0 +1,12 @@
+.agent-control/
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+node_modules/
+out/
+*.vsix
+*.log
+config.local.yaml
+.env
