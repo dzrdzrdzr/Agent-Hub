@@ -87,6 +87,8 @@ export class GaussClient {
         return this.request('get_log_tail', { task_id: taskId, lines });
     }
 
+    async getBudgetStatus(): Promise<any> { return this.request('get_budget_status', {}); }
+
     async ping(): Promise<any> {
         return this.request('ping', {});
     }
