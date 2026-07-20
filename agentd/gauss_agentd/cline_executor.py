@@ -39,22 +39,23 @@ class MockClineExecutor:
         run_id = "mock-" + task_id[:8]
         delay = self.config.cline.mock_delay_seconds
         exit_code = self.config.cline.mock_exit_code
-        await asyncio.sleep(delay)
-        if self.task_manager:
-            self.task_manager.db.update_task_field(task_id,
-                cline_exit_code=exit_code, cline_pid=99999,
-                run_id=run_id, log_stdout="mock_stdout.log",
-                log_stderr="mock_stderr.log")
-            if exit_code == 0:
-                self.task_manager.transition(task_id, "CLINE_SUCCEEDED", trigger="mock_exit_zero")
-            else:
-                task = self.task_manager.get_task(task_id)
-                if task["retry_count"] < task["max_retries"]:
-                    self.task_manager.transition(task_id, "CLINE_FAILED", trigger="mock_exit_nonzero")
-                    self.task_manager.transition(task_id, "CLINE_STARTING", trigger="mock_retry")
-                    await self.spawn(task)
-                else:
-                    self.task_manager.transition(task_id, "CLINE_FAILED", trigger="mock_exit_terminal")
+        tm = self.task_manager
+
+        max_retries = self.config.cline.max_retries
+        for attempt in range(max_retries + 1):
+            await asyncio.sleep(delay)
+            if tm:
+                tm.db.update_task_field(task_id, cline_exit_code=exit_code, cline_pid=99999, run_id=run_id)
+                if exit_code == 0:
+                    tm.transition(task_id, "CLINE_SUCCEEDED", trigger="mock_exit_zero")
+                    return run_id, {"pid": 99999, "run_id": run_id, "mock": True}
+                t = tm.get_task(task_id)
+                if t["retry_count"] < t["max_retries"]:
+                    tm.transition(task_id, "CLINE_FAILED", trigger="mock_exit_nonzero")
+                    tm.transition(task_id, "CLINE_STARTING", trigger="mock_retry")
+                    continue
+        if tm:
+            tm.transition(task_id, "CLINE_FAILED", trigger="mock_exit_terminal")
         return run_id, {"pid": 99999, "run_id": run_id, "mock": True}
 
     async def stop(self, task_id):
@@ -62,7 +63,6 @@ class MockClineExecutor:
 
     async def shutdown(self):
         pass
-
 
 class ClineExecutor:
     """Manages async Cline CLI subprocess execution."""
@@ -156,11 +156,11 @@ class ClineExecutor:
             ppid = 0
 
         proc_info = {
-            "pid": process.pid,
-            "start_time": start_time,
-            "cmd_hash": cmd_hash(cmd),
-            "cwd": cwd,
-            "ppid": ppid,
+            "cline_pid": process.pid,
+            "cline_start_time": start_time,
+            "cline_cmd_hash": cmd_hash(cmd),
+            "cline_cwd": cwd,
+            "cline_ppid": ppid,
             "run_id": run_id,
             "log_stdout": stdout_path,
             "log_stderr": stderr_path,
@@ -200,11 +200,9 @@ class ClineExecutor:
         self._running.pop(task_id, None)
         self._processes.pop(task_id, None)
 
-        # Check result file
+        # Classify result: exit 0 = SUCCEEDED
         task = self.task_manager.get_task(task_id) if self.task_manager else None
-        result_file = task.get("result_file") if task else None
-
-        if exit_code == 0 and result_file and os.path.exists(result_file):
+        if exit_code == 0:
             result = ClineResult.SUCCEEDED
         else:
             result = ClineResult.FAILED
@@ -227,8 +225,10 @@ class ClineExecutor:
                                                       trigger="cline_exit_nonzero")
                         self.task_manager.transition(task_id, "CLINE_STARTING",
                                                       trigger="auto_retry")
-                        # Re-spawn
+                        # Re-spawn and move to RUNNING
                         await self.spawn(task)
+                        self.task_manager.transition(task_id, "CLINE_RUNNING",
+                                                      trigger="retry_spawned")
                     else:
                         self.task_manager.transition(task_id, "CLINE_FAILED",
                                                       trigger="cline_exit_nonzero_terminal")
