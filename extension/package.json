@@ -1,0 +1,48 @@
+{
+  "name": "gauss-agent-control",
+  "displayName": "GAUSS Agent Control Center",
+  "version": "0.1.0",
+  "publisher": "gauss",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionKind": ["workspace"],
+  "activationEvents": [
+    "onCommand:gauss-agent.submitTask",
+    "onCommand:gauss-agent.showOverview",
+    "onView:gauss-agent.overview"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {"command": "gauss-agent.submitTask", "title": "GAUSS: Submit Task"},
+      {"command": "gauss-agent.showOverview", "title": "GAUSS: Show Overview"},
+      {"command": "gauss-agent.cancelTask", "title": "GAUSS: Cancel Task"},
+      {"command": "gauss-agent.refreshStatus", "title": "GAUSS: Refresh Status"}
+    ],
+    "viewsContainers": {
+      "activitybar": [{
+        "id": "gauss-agent-sidebar",
+        "title": "GAUSS Agent",
+        "icon": "media/icon.svg"
+      }]
+    },
+    "views": {
+      "gauss-agent-sidebar": [
+        {"id": "gauss-agent.overview", "name": "Overview"}
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.0.0"
+  }
+}

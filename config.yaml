@@ -1,0 +1,25 @@
+agentd:
+  ipc:
+    transport: tcp
+    tcp_host: 127.0.0.1
+    tcp_port: 19876
+  cline:
+    executable: auto
+    timeout_seconds: 600
+    stall_threshold_seconds: 300
+    max_retries: 1
+    mock: false
+    mock_exit_code: 0
+    mock_delay_seconds: 1.0
+    env:
+      HTTP_PROXY: http://127.0.0.1:17898
+      HTTPS_PROXY: http://127.0.0.1:17898
+  database:
+    path: .agent-control/state.sqlite
+  logs:
+    dir: .agent-control/logs/
+  safety:
+    protected_paths: []
+    forbidden_commands: []
+    allow_network: false
+    max_execution_time_seconds: 3600
