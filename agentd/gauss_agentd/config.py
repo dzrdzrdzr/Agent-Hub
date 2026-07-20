@@ -63,6 +63,43 @@ class AgentdConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
 
 
+
+def load_cline_extension_config() -> dict:
+    """Load API key/model from Cline VS Code extension configuration."""
+    import json
+    cline_dir = os.path.join(os.path.expanduser("~"), ".cline", "data", "settings")
+    providers_path = os.path.join(cline_dir, "providers.json")
+    if not os.path.exists(providers_path):
+        return {}
+    try:
+        with open(providers_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        providers = data.get("providers", {})
+        last_used = data.get("lastUsedProvider", "cline")
+        if last_used in providers:
+            p = providers[last_used]
+            s = p.get("settings", {})
+            result = {
+                "provider": last_used,
+                "model": s.get("model", ""),
+                "api_key": s.get("apiKey", ""),
+            }
+            if result["api_key"]:
+                return result
+        if "cline" in providers:
+            cs = providers["cline"].get("settings", {})
+            auth = cs.get("auth", {})
+            if auth.get("accessToken"):
+                return {
+                    "provider": "cline",
+                    "model": cs.get("model", ""),
+                    "api_key": auth["accessToken"],
+                }
+        return {}
+    except Exception:
+        return {}
+
+
 def _default_config_path() -> str:
     agent_home = os.environ.get("GAUSS_AGENT_HOME", "")
     if agent_home:
