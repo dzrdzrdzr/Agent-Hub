@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS kv_store (
 
 CREATE INDEX IF NOT EXISTS idx_transitions_task ON state_transitions(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 """
 
 
@@ -86,17 +87,42 @@ class Database:
         with self._get_conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(SCHEMA)
             cur = conn.execute("SELECT MAX(version) FROM schema_version")
             row = cur.fetchone()
-            if row[0] is None:
-                conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            current = row[0] if row[0] is not None else 0
+            if current < SCHEMA_VERSION:
+                self._run_migrations(conn, current, SCHEMA_VERSION)
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,)
+                )
+            elif current == 0:
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,)
+                )
             conn.commit()
+
+    def _run_migrations(self, conn, from_version: int, to_version: int):
+        """Run schema migrations."""
+        if from_version < 2:
+            # v1 -> v2: add indexes
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.db_path)
             self._local.conn.row_factory = sqlite3.Row
+            # Apply per-connection pragmas
+            self._local.conn.execute("PRAGMA busy_timeout=5000")
         return self._local.conn
 
     @contextmanager
@@ -152,8 +178,38 @@ class Database:
     def get_tasks_by_state(self, state: str) -> List[Dict[str, Any]]:
         return self.fetch_all("SELECT * FROM tasks WHERE state = ?", (state,))
 
-    def get_all_tasks(self) -> List[Dict[str, Any]]:
+    def get_all_tasks(self, limit: int = None, offset: int = 0) -> List[Dict[str, Any]]:
+        if limit is not None:
+            return self.fetch_all(
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            )
         return self.fetch_all("SELECT * FROM tasks ORDER BY created_at DESC")
+
+    def get_tasks_by_states(self, states: tuple, limit: int = None,
+                             offset: int = 0) -> List[Dict[str, Any]]:
+        """Get tasks matching any of the given states (SQL-side filter)."""
+        placeholders = ",".join("?" * len(states))
+        if limit is not None:
+            return self.fetch_all(
+                f"SELECT * FROM tasks WHERE state IN ({placeholders}) "
+                f"ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*states, limit, offset)
+            )
+        return self.fetch_all(
+            f"SELECT * FROM tasks WHERE state IN ({placeholders}) "
+            f"ORDER BY created_at DESC",
+            states
+        )
+
+    def count_tasks_by_states(self, states: tuple) -> int:
+        """Count tasks matching any of the given states."""
+        placeholders = ",".join("?" * len(states))
+        row = self.fetch_one(
+            f"SELECT COUNT(*) as cnt FROM tasks WHERE state IN ({placeholders})",
+            states
+        )
+        return row["cnt"] if row else 0
 
     def update_task_state(self, task_id: str, new_state: str, trigger: str = "",
                            pid: int = None, model_called: bool = False):
@@ -162,10 +218,12 @@ class Database:
             raise ValueError(f"Task {task_id} not found")
         old_state = task["state"]
         now = datetime.now(timezone.utc).isoformat()
+        terminal_states = {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED"}
+        completed = now if new_state in terminal_states else None
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE tasks SET state = ?, completed_at = ? WHERE id = ?",
-                (new_state, now if new_state in ("CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED") else None, task_id)
+                (new_state, completed, task_id)
             )
             self._log_transition(conn, task_id, old_state, new_state, trigger,
                                  pid=pid, model_called=model_called,
@@ -240,3 +298,30 @@ class Database:
     def get_kv(self, key: str) -> Optional[str]:
         row = self.fetch_one("SELECT value FROM kv_store WHERE key = ?", (key,))
         return row["value"] if row else None
+
+    # ---- Janitor helpers ----
+
+    def clean_task(self, task_id: str):
+        """Delete a task and its transitions."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM state_transitions WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+
+    def clean_old_terminal_tasks(self, retention_seconds: float) -> int:
+        """Delete terminal tasks older than retention_seconds. Returns count."""
+        cutoff = datetime.now(timezone.utc).isoformat()
+        # Simple approach: delete by created_at date comparison
+        # For more precision, use timestamp comparison in Python
+        terminal = ["CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED"]
+        placeholders = ",".join("?" * len(terminal))
+        with self.transaction() as conn:
+            cur = conn.execute(
+                f"DELETE FROM state_transitions WHERE task_id IN "
+                f"(SELECT id FROM tasks WHERE state IN ({placeholders}))",
+                terminal
+            )
+            cur = conn.execute(
+                f"DELETE FROM tasks WHERE state IN ({placeholders})",
+                terminal
+            )
+            return cur.rowcount

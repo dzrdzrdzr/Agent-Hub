@@ -1,35 +1,123 @@
 {
-  "name": "gauss-agent-control",
-  "displayName": "GAUSS Agent Control Center",
-  "version": "0.1.0",
-  "publisher": "gauss",
-  "engines": { "vscode": "^1.85.0" },
-  "extensionKind": ["workspace"],
-  "activationEvents": ["onStartupFinished"],
+  "name": "agent-hub",
+  "displayName": "Agent Hub",
+  "description": "Planner \u2194 Executor bridge: a sidebar that lets AI coding agents (Codex, KimiCode) plan and review while delegating heavy code edits to Cline CLI. Submit tasks, watch live output, retry on failure \u2014 all from one panel.",
+  "version": "0.2.2",
+  "publisher": "agenthub",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Agent Hub",
+      "properties": {
+        "agentHub.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python interpreter for the daemon (needs pyyaml + psutil). Empty = auto-detect from PATH and conda environments."
+        },
+        "agentHub.port": {
+          "type": "number",
+          "default": 19876,
+          "description": "TCP port for the Agent Hub daemon. Must match the port in config.yaml (default 19876)."
+        },
+        "agentHub.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the daemon when VS Code opens. Turn off if you prefer to start it manually via 'Agent Hub: Start Daemon' or the status bar."
+        }
+      }
+    },
     "commands": [
-      {"command": "gauss-agent.submitTask", "title": "GAUSS: Submit Task", "icon": "$(add)"},
-      {"command": "gauss-agent.cancelTask", "title": "GAUSS: Cancel Task", "icon": "$(stop)"},
-      {"command": "gauss-agent.refresh", "title": "GAUSS: Refresh", "icon": "$(refresh)"}
+      {
+        "command": "agent-hub.submitTask",
+        "title": "Agent Hub: Delegate Task to Cline",
+        "icon": "$(add)"
+      },
+      {
+        "command": "agent-hub.cancelTask",
+        "title": "Agent Hub: Cancel Running Task",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "agent-hub.refresh",
+        "title": "Agent Hub: Refresh Task List",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agent-hub.startDaemon",
+        "title": "Agent Hub: Start Daemon",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "agent-hub.showLog",
+        "title": "Agent Hub: Show Daemon Log",
+        "icon": "$(output)"
+      },
+      {
+        "command": "agent-hub.openTask",
+        "title": "Agent Hub: Watch Task Output",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "agent-hub.openTaskLog",
+        "title": "Agent Hub: Open Raw Output Log",
+        "icon": "$(file-text)"
+      }
     ],
     "menus": {
       "view/title": [
-        {"command": "gauss-agent.submitTask", "when": "view == gauss-agent.tasks", "group": "navigation"},
-        {"command": "gauss-agent.refresh", "when": "view == gauss-agent.tasks", "group": "navigation"}
+        {
+          "command": "agent-hub.submitTask",
+          "when": "view == agent-hub.tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "agent-hub.refresh",
+          "when": "view == agent-hub.tasks",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        {"command": "gauss-agent.cancelTask", "when": "view == gauss-agent.tasks"}
+        {
+          "command": "agent-hub.openTask",
+          "when": "view == agent-hub.tasks",
+          "group": "inline"
+        },
+        {
+          "command": "agent-hub.openTaskLog",
+          "when": "view == agent-hub.tasks"
+        },
+        {
+          "command": "agent-hub.cancelTask",
+          "when": "view == agent-hub.tasks"
+        }
       ]
     },
     "views": {
-      "gauss-agent": [
-        {"id": "gauss-agent.tasks", "name": "Tasks", "icon": "media/icon.svg", "contextualTitle": "GAUSS Agent"}
+      "agent-hub": [
+        {
+          "id": "agent-hub.tasks",
+          "name": "Tasks",
+          "contextualTitle": "Agent Hub"
+        }
       ]
     },
     "viewsContainers": {
       "activitybar": [
-        {"id": "gauss-agent", "title": "GAUSS Agent", "icon": "media/icon.svg"}
+        {
+          "id": "agent-hub",
+          "title": "Agent Hub",
+          "icon": "media/icon.svg"
+        }
       ]
     }
   },

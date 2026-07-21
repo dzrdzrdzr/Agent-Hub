@@ -21,7 +21,7 @@ class IPCConfig:
     def __post_init__(self):
         if not self.unix_socket:
             xdg = os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(os.getuid() if hasattr(os, "getuid") else 1000))
-            self.unix_socket = os.path.join(xdg, "gauss-agent.sock")
+            self.unix_socket = os.path.join(xdg, "agent-hub.sock")
 
 
 @dataclass
@@ -34,16 +34,19 @@ class ClineConfig:
     mock_exit_code: int = 0
     mock_delay_seconds: float = 1.0
     env: Dict[str, str] = field(default_factory=dict)
+    kill_on_shutdown: bool = False  # NEW: kill Cline processes on daemon shutdown
+    retention_days: int = 30         # NEW: days to keep terminal tasks
+    max_task_history: int = 1000     # NEW: max tasks to keep in DB
 
 
 @dataclass
 class DatabaseConfig:
-    path: str = ".agent-control/state.sqlite"
+    path: str = ".agent-hub/state.sqlite"
 
 
 @dataclass
 class LogsConfig:
-    dir: str = ".agent-control/logs/"
+    dir: str = ".agent-hub/logs/"
 
 
 @dataclass
@@ -61,7 +64,6 @@ class AgentdConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     logs: LogsConfig = field(default_factory=LogsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
-
 
 
 def load_cline_extension_config() -> dict:
@@ -101,10 +103,10 @@ def load_cline_extension_config() -> dict:
 
 
 def _default_config_path() -> str:
-    agent_home = os.environ.get("GAUSS_AGENT_HOME", "")
+    agent_home = os.environ.get("AGENT_HUB_HOME", "")
     if agent_home:
         return os.path.join(agent_home, "config.yaml")
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "..", "config.yaml")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "config.yaml")
 
 
 def load_config(path: Optional[str] = None) -> AgentdConfig:
@@ -136,13 +138,16 @@ def load_config(path: Optional[str] = None) -> AgentdConfig:
         mock_exit_code=cline_data.get("mock_exit_code", 0),
         mock_delay_seconds=cline_data.get("mock_delay_seconds", 1.0),
         env=cline_data.get("env", {}),
+        kill_on_shutdown=cline_data.get("kill_on_shutdown", False),
+        retention_days=cline_data.get("retention_days", 30),
+        max_task_history=cline_data.get("max_task_history", 1000),
     )
 
     db_data = agentd_data.get("database", {})
-    db = DatabaseConfig(path=db_data.get("path", ".agent-control/state.sqlite"))
+    db = DatabaseConfig(path=db_data.get("path", ".agent-hub/state.sqlite"))
 
     logs_data = agentd_data.get("logs", {})
-    logs = LogsConfig(dir=logs_data.get("dir", ".agent-control/logs/"))
+    logs = LogsConfig(dir=logs_data.get("dir", ".agent-hub/logs/"))
 
     safety_data = agentd_data.get("safety", {})
     safety = SafetyConfig(

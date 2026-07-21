@@ -1,10 +1,10 @@
 import pytest
 import os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from gauss_agentd.db import Database
-from gauss_agentd.task_manager import TaskManager
-from gauss_agentd.cline_executor import MockClineExecutor
-from gauss_agentd.config import ClineConfig, AgentdConfig
+from agent_hub.db import Database
+from agent_hub.task_manager import TaskManager
+from agent_hub.cline_executor import MockClineExecutor
+from agent_hub.config import ClineConfig, AgentdConfig
 
 def make_config(**kw):
     c = ClineConfig(mock=True, mock_exit_code=kw.get('exit_code', 0),

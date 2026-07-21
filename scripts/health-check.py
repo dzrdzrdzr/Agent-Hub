@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Health check for gauss-agentd daemon."""
+"""Health check for the Agent Hub daemon."""
 import socket, json, sys
 
 def check(host="127.0.0.1", port=19876):

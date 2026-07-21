@@ -11,13 +11,16 @@ agentd:
     mock: false
     mock_exit_code: 0
     mock_delay_seconds: 1.0
+    kill_on_shutdown: false
+    retention_days: 30
+    max_task_history: 1000
     env:
       HTTP_PROXY: http://127.0.0.1:17898
       HTTPS_PROXY: http://127.0.0.1:17898
   database:
-    path: .agent-control/state.sqlite
+    path: .agent-hub/state.sqlite
   logs:
-    dir: .agent-control/logs/
+    dir: .agent-hub/logs/
   safety:
     protected_paths: []
     forbidden_commands: []

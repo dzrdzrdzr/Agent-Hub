@@ -1,6 +1,6 @@
 import os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from gauss_agentd.db import Database
+from agent_hub.db import Database
 
 def test_db_create_task():
     with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from gauss_agentd.config import load_config, resolve_cline_path, cmd_hash
+from agent_hub.config import load_config, resolve_cline_path, cmd_hash
 
 def test_load_default_config():
     config = load_config()
