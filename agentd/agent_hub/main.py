@@ -60,21 +60,36 @@ async def _watchdog_scan(task_manager, cline_executor, db):
             logging.getLogger("agentd").warning(
                 f"Watchdog: task {task_id} state={state} but PID {pid} is dead"
             )
-            db.update_task_state(task_id, "CLINE_FAILED",
-                                  trigger="watchdog_process_gone")
-            # Try auto-retry
+            # Use task_manager.transition so retry_count is properly tracked
+            try:
+                task_manager.transition(task_id, "CLINE_FAILED",
+                                         trigger="watchdog_process_gone")
+            except ValueError:
+                pass
+            # Try auto-retry with proper retry_count increment
             t = db.get_task(task_id)
             if t["retry_count"] < t["max_retries"]:
-                db.update_task_state(task_id, "CLINE_STARTING", trigger="watchdog_retry")
+                try:
+                    task_manager.transition(task_id, "CLINE_STARTING",
+                                             trigger="watchdog_retry")
+                except ValueError:
+                    pass
                 try:
                     await cline_executor.spawn(t)
-                    db.update_task_state(task_id, "CLINE_RUNNING", trigger="watchdog_retry_spawned")
+                    try:
+                        task_manager.transition(task_id, "CLINE_RUNNING",
+                                                 trigger="watchdog_retry_spawned")
+                    except ValueError:
+                        pass
                 except Exception as e:
                     logging.getLogger("agentd").error(
                         f"Watchdog spawn failed for {task_id}: {e}"
                     )
-                    db.update_task_state(task_id, "CLINE_FAILED",
-                                          trigger="watchdog_spawn_failed")
+                    try:
+                        task_manager.transition(task_id, "CLINE_FAILED",
+                                                 trigger="watchdog_spawn_failed")
+                    except ValueError:
+                        pass
 
 
 async def _janitor_scan(db, logs_dir, retention_days=30, max_tasks=1000):
@@ -174,7 +189,7 @@ async def main():
     task_manager = TaskManager(db)
     budget_tracker = BudgetTracker(db)
     safety_guard = SafetyGuard(config.safety, workspace_root=cwd)
-    cline_executor = ClineExecutor(config, task_manager=task_manager)
+    cline_executor = ClineExecutor(config, task_manager=task_manager, safety_guard=safety_guard)
     goal_manager = GoalManager(db)
     event_manager = EventManager(db)
     training_manager = TrainingManager(
@@ -218,6 +233,7 @@ async def main():
         db=db, goal_manager=goal_manager, event_manager=event_manager,
         task_manager=task_manager, cline_executor=cline_executor,
         training_manager=training_manager, codex_executor=codex_executor,
+        safety_guard=safety_guard,
         event_wait_timeout=config.cline.stall_threshold_seconds,
     )
     logger.info("  Orchestrator initialized")

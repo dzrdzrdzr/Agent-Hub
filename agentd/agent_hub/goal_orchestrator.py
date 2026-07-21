@@ -35,6 +35,7 @@ class GoalOrchestrator:
                  event_manager: EventManager,
                  task_manager=None, cline_executor=None,
                  training_manager=None, codex_executor=None,
+                 safety_guard=None,
                  max_iterations: int = 10, max_failures: int = 3,
                  event_wait_timeout: int = 60):
         self.db = db
@@ -44,6 +45,7 @@ class GoalOrchestrator:
         self.cline_executor = cline_executor
         self.training_manager = training_manager
         self.codex_executor = codex_executor
+        self.safety_guard = safety_guard
         self.max_iterations = max_iterations
         self.max_failures = max_failures
         self.event_wait_timeout = event_wait_timeout
@@ -96,11 +98,24 @@ class GoalOrchestrator:
                 self.goal_manager.transition(goal_id, "GOAL_EXECUTING",
                                               trigger="orchestrator_loop_start")
 
+            # Restore checkpoint on restart
+            goal = self.goal_manager.get_goal(goal_id)
+            resume_step = goal.get("orchestrator_step", "")
+            if resume_step:
+                logger.info(f"Goal {goal_id}: resuming from orchestrator_step={resume_step}")
+
             while self.goal_manager.should_continue(goal_id):
                 goal = self.goal_manager.get_goal(goal_id)
 
+                # Skip planning if review just created a needs_changes fixup task
+                skip_plan = goal.get("skip_next_plan")
+                if skip_plan:
+                    self.goal_manager.clear_skip_next_plan(goal_id)
+                    logger.info(f"Goal {goal_id}: skipping plan, executing needs_changes fixup")
+
                 # Step 1: Plan (Codex creates the next task)
-                await self._step_plan(goal)
+                if not skip_plan and resume_step not in ("executing", "waiting_cline", "training", "reviewing"):
+                    await self._step_plan(goal)
                 # Check if goal completed during planning
                 goal = self.goal_manager.get_goal(goal_id)
                 if goal and goal["state"] in ("GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED"):
@@ -109,16 +124,21 @@ class GoalOrchestrator:
                     break
 
                 # Step 2: Execute (Cline runs the task)
-                await self._step_execute(goal_id)
+                if resume_step not in ("waiting_cline", "training", "reviewing"):
+                    await self._step_execute(goal_id)
 
                 # Step 3: Wait for Cline completion
-                await self._step_wait_cline(goal_id)
+                if resume_step not in ("training", "reviewing"):
+                    await self._step_wait_cline(goal_id)
 
                 # Step 4: Handle training if requested
-                await self._step_training(goal_id)
+                if resume_step != "reviewing":
+                    await self._step_training(goal_id)
 
                 # Step 5: Review (Codex reviews results)
                 should_continue = await self._step_review(goal_id)
+                # Clear resume step after first full iteration
+                resume_step = ""
                 if not should_continue:
                     goal_post = self.goal_manager.get_goal(goal_id)
                     if goal_post and goal_post["state"] == "GOAL_COMPLETED":
@@ -139,8 +159,9 @@ class GoalOrchestrator:
                 elif goal["failure_count"] >= goal["max_failures"]:
                     self.goal_manager.fail_goal(goal_id, "max_failures_reached")
                 else:
-                    self.goal_manager.complete_goal(goal_id)
-                    closing_event = "GOAL_COMPLETED"
+                    # Loop exited without explicit completion — treat as blocked/failed,
+                    # never silently mark as completed
+                    self.goal_manager.fail_goal(goal_id, "review_blocked_or_unknown_verdict")
 
             self.event_manager.emit_event(closing_event, goal_id=goal_id)
 
@@ -157,6 +178,9 @@ class GoalOrchestrator:
     async def _step_plan(self, goal: Dict[str, Any]):
         """Codex generates the next task."""
         goal_id = goal["id"]
+
+        if goal.get("skip_next_plan"):
+            return  # Already have a needs_changes fixup task pending
         self.goal_manager.increment_iteration(goal_id)
         self.goal_manager.transition(goal_id, "GOAL_PLANNING", trigger="step_plan")
 
@@ -221,6 +245,17 @@ class GoalOrchestrator:
                 pass
 
         if self.cline_executor:
+            # Safety check before spawning
+            if hasattr(self, 'safety_guard') and self.safety_guard:
+                safety_result = self.safety_guard.check(
+                    task.get("prompt", ""), task.get("cline_cwd", "")
+                )
+                if not safety_result.allowed:
+                    self.goal_manager.fail_goal(goal_id,
+                        reason=f"safety_blocked: {safety_result.details}")
+                    logger.error(f"Goal {goal_id}: safety blocked task {task_id}")
+                    return
+
             try:
                 run_id, info = await self.cline_executor.spawn(task)
                 # Task may have completed already (mock). Only transition if not terminal.
@@ -231,6 +266,7 @@ class GoalOrchestrator:
                                                       trigger="orchestrator_spawned")
                     except ValueError:
                         pass
+                self.goal_manager.set_orchestrator_step(goal_id, "executing")
                 logger.info(f"Goal {goal_id}: spawned Cline for task {task_id}, state={task['state'] if task else '?'}")
             except ValueError as e:
                 pass  # transition error swallowed
@@ -242,6 +278,7 @@ class GoalOrchestrator:
         """Wait for Cline completion event."""
         self.goal_manager.transition(goal_id, "GOAL_WAITING_EVENT",
                                       trigger="waiting_cline")
+        self.goal_manager.set_orchestrator_step(goal_id, "waiting_cline")
 
         # Poll task state first (handles mock/fast completion)
         await asyncio.sleep(0.5)  # brief yield for async completion
@@ -318,6 +355,7 @@ class GoalOrchestrator:
             return
 
         self.goal_manager.transition(goal_id, "GOAL_EXECUTING", trigger="training_start")
+        self.goal_manager.set_orchestrator_step(goal_id, "training")
 
         training_cmd = task.get("training_command", "")
         if training_cmd:
@@ -350,6 +388,7 @@ class GoalOrchestrator:
             return False
 
         self.goal_manager.transition(goal_id, "GOAL_REVIEWING", trigger="step_review")
+        self.goal_manager.set_orchestrator_step(goal_id, "reviewing")
 
         task_id = goal.get("current_task_id")
         task = self.task_manager.get_task(task_id) if task_id else None
@@ -382,6 +421,7 @@ class GoalOrchestrator:
             if result.verdict in ("approved", "goal_achieved"):
                 self.goal_manager.transition(goal_id, "GOAL_ITERATING",
                                               trigger="review_approved")
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 return True  # continue loop
             elif result.verdict == "needs_changes":
                 next_task = result.next_task
@@ -396,9 +436,14 @@ class GoalOrchestrator:
                     self.goal_manager.set_current_task(goal_id, new_task["id"])
                 self.goal_manager.transition(goal_id, "GOAL_ITERATING",
                                               trigger="review_needs_changes")
+                # Set flag to skip next planning — execute the fixup task directly
+                self.goal_manager.set_skip_next_plan(goal_id)
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 return True
             else:
-                # blocked or other — stop
+                # blocked or unknown verdict — stop and fail
+                self.goal_manager.fail_goal(goal_id,
+                    reason=f"review_verdict:{result.verdict}")
                 return False
 
         except Exception as e:

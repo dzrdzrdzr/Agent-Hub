@@ -258,6 +258,14 @@ class Database:
                 pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_training ON tasks(training_state)")
+            try:
+                conn.execute("ALTER TABLE goals ADD COLUMN skip_next_plan INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE goals ADD COLUMN orchestrator_step TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:

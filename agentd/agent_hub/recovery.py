@@ -112,20 +112,41 @@ async def _recover_cline_tasks(db, task_manager, cline_executor) -> List[Dict]:
                                       trigger="recovery_process_gone")
                 recovered.append({"task_id": task_id, "action": "process_gone", "type": "cline"})
 
-        # Auto-retry if eligible
+        # Auto-retry if eligible — use task_manager for proper retry_count tracking
         task = db.get_task(task_id)
         if task["state"] == "CLINE_FAILED" and task["retry_count"] < task["max_retries"]:
-            db.update_task_state(task_id, "CLINE_STARTING", trigger="recovery_retry")
+            if task_manager:
+                try:
+                    task_manager.transition(task_id, "CLINE_STARTING",
+                                             trigger="recovery_retry")
+                except ValueError:
+                    pass
+            else:
+                db.update_task_state(task_id, "CLINE_STARTING", trigger="recovery_retry")
             recovered.append({"task_id": task_id, "action": "auto_retry", "type": "cline"})
             if cline_executor:
                 try:
                     await cline_executor.spawn(task)
-                    db.update_task_state(task_id, "CLINE_RUNNING",
-                                          trigger="recovery_retry_spawned")
+                    if task_manager:
+                        try:
+                            task_manager.transition(task_id, "CLINE_RUNNING",
+                                                     trigger="recovery_retry_spawned")
+                        except ValueError:
+                            pass
+                    else:
+                        db.update_task_state(task_id, "CLINE_RUNNING",
+                                              trigger="recovery_retry_spawned")
                 except Exception as e:
                     logger.error(f"Recovery spawn failed for {task_id}: {e}")
-                    db.update_task_state(task_id, "CLINE_FAILED",
-                                          trigger="recovery_spawn_failed")
+                    if task_manager:
+                        try:
+                            task_manager.transition(task_id, "CLINE_FAILED",
+                                                     trigger="recovery_spawn_failed")
+                        except ValueError:
+                            pass
+                    else:
+                        db.update_task_state(task_id, "CLINE_FAILED",
+                                              trigger="recovery_spawn_failed")
 
     return recovered
 

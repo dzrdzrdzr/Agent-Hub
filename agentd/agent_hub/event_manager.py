@@ -33,7 +33,7 @@ class EventManager:
     def __init__(self, db: Database):
         self.db = db
         self._waiters = {}  # waiter_id -> asyncio.Event + metadata
-        self._state_version = 0
+        self._state_version = self.db.get_latest_version()
 
     # ---- Event creation ----
 

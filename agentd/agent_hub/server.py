@@ -180,6 +180,20 @@ class IPCServer:
                 "reason": safety_result.details,
             }
 
+        if safety_result.requires_approval:
+            self.task_manager.transition(task["id"], "WAITING_APPROVAL",
+                                          trigger="safety_approval_required")
+            logger.warning(f"Task {task['id']} requires approval: {safety_result.details}")
+            await self.push("state_changed",
+                            {"task_id": task["id"], "state": "WAITING_APPROVAL"})
+            return {
+                "task_id": task["id"],
+                "state": "WAITING_APPROVAL",
+                "requires_approval": True,
+                "reason": safety_result.details,
+                "risk": safety_result.risk.value,
+            }
+
         self.task_manager.transition(task["id"], "CLINE_STARTING", trigger="submit")
 
         try:

@@ -99,7 +99,8 @@ class TrainingManager:
         )
 
         logger.info(f"Training requested for task {task_id}: {training_cmd[:100]}")
-        return training_task
+        # Re-read from DB to get fresh dict with training_command set
+        return self.db.get_task(training_id)
 
     async def spawn(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Spawn training process from task training_command."""
@@ -410,6 +411,29 @@ class TrainingManager:
             logger.warning(f"Cannot attach training monitor for {task_id}: no log path")
             return
 
+        # Verify process ownership before attaching
+        is_ours, reason = verify_process_identity({
+            "pid": pid,
+            "start_time": task.get("training_start_time"),
+            "cmd_hash": task.get("training_cmd_hash"),
+            "cmdline": (json.loads(task.get("training_cmdline", "[]"))
+                     if task.get("training_cmdline") else []),
+            "cwd": task.get("training_cwd"),
+            "id": task_id,
+        })
+        if not is_ours:
+            logger.warning(f"Recovery: training {task_id} PID {pid} NOT ours: {reason}")
+            self.db.update_task_field(task_id, training_state="TRAINING_FAILED",
+                                       error_summary=f"recovery_pid_mismatch: {reason}")
+            if self.event_manager:
+                task = self.db.get_task(task_id)
+                goal_id = task.get("goal_id") if task else None
+                self.event_manager.emit_event(
+                    "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                    payload={"reason": f"pid_mismatch: {reason}"}
+                )
+            return
+
         async def _recovery_monitor():
             try:
                 while check_process_alive(pid):
@@ -420,11 +444,33 @@ class TrainingManager:
                     exit_code = psutil.Process(pid).wait()
                 except Exception:
                     pass
-                self.db.update_task_field(
-                    task_id, training_state="TRAINING_COMPLETED",
-                    training_exit_code=exit_code
-                )
-                await self._trigger_result_ready(task_id)
+
+                if exit_code == 0:
+                    self.db.update_task_field(
+                        task_id, training_state="TRAINING_COMPLETED",
+                        training_exit_code=0
+                    )
+                    if self.event_manager:
+                        task = self.db.get_task(task_id)
+                        goal_id = task.get("goal_id") if task else None
+                        self.event_manager.emit_event(
+                            "TRAINING_COMPLETED", goal_id=goal_id, task_id=task_id,
+                            payload={"exit_code": 0}
+                        )
+                    await self._trigger_result_ready(task_id)
+                else:
+                    self.db.update_task_field(
+                        task_id, training_state="TRAINING_FAILED",
+                        training_exit_code=exit_code,
+                        error_summary=f"recovery_exit_code:{exit_code}"
+                    )
+                    if self.event_manager:
+                        task = self.db.get_task(task_id)
+                        goal_id = task.get("goal_id") if task else None
+                        self.event_manager.emit_event(
+                            "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                            payload={"exit_code": exit_code}
+                        )
             except Exception as e:
                 logger.error(f"Recovery training monitor error {task_id}: {e}")
 

@@ -25,7 +25,8 @@ TRANSITIONS = {
                             "GOAL_FAILED", "GOAL_CANCELLED", "GOAL_COMPLETED"},
     "GOAL_REVIEWING": {"GOAL_ITERATING", "GOAL_EXECUTING", "GOAL_COMPLETED",
                         "GOAL_FAILED", "GOAL_CANCELLED"},
-    "GOAL_ITERATING": {"GOAL_PLANNING", "GOAL_EXECUTING", "GOAL_COMPLETED",
+    "GOAL_ITERATING": {"GOAL_PLANNING", "GOAL_EXECUTING", "GOAL_WAITING_EVENT",
+                        "GOAL_REVIEWING", "GOAL_COMPLETED",
                         "GOAL_FAILED", "GOAL_CANCELLED"},
     "GOAL_COMPLETED": set(),
     "GOAL_FAILED": set(),
@@ -112,6 +113,24 @@ class GoalManager:
 
     def set_current_task(self, goal_id: str, task_id: str):
         self.db.update_goal_field(goal_id, current_task_id=task_id)
+
+    def set_skip_next_plan(self, goal_id: str):
+        """Flag that the next loop iteration should skip planning."""
+        self.db.execute(
+            "UPDATE goals SET skip_next_plan = 1 WHERE id = ?", (goal_id,)
+        )
+
+    def set_orchestrator_step(self, goal_id: str, step: str):
+        """Persist current orchestrator step for recovery after restart."""
+        self.db.execute(
+            "UPDATE goals SET orchestrator_step = ? WHERE id = ?", (step, goal_id)
+        )
+
+    def clear_skip_next_plan(self, goal_id: str):
+        """Clear the skip-next-plan flag."""
+        self.db.execute(
+            "UPDATE goals SET skip_next_plan = 0 WHERE id = ?", (goal_id,)
+        )
 
     def set_latest_decision(self, goal_id: str, decision: dict):
         self.db.update_goal_field(

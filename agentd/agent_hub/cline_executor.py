@@ -86,8 +86,10 @@ class MockClineExecutor:
 class ClineExecutor:
     """Manages async Cline CLI subprocess execution."""
 
-    def __init__(self, config: AgentdConfig, task_manager=None):
+    def __init__(self, config: AgentdConfig, task_manager=None,
+                 safety_guard=None):
         self.config = config
+        self.safety_guard = safety_guard
         self.task_manager = task_manager
         self._event_manager = None  # set by main._wire_events
         self._running = {}       # task_id -> asyncio.Task (_wait_exit)
@@ -354,6 +356,25 @@ class ClineExecutor:
 
         logger.info(f"Cline {task_id}: exit_code={exit_code}, result={result}")
 
+        # Run post-hoc command audit on Cline log
+        if self.safety_guard:
+            task = self.task_manager.get_task(task_id) if self.task_manager else None
+            if task:
+                log_path = task.get("log_stdout", "")
+                if log_path and os.path.exists(log_path):
+                    try:
+                        violations = self.safety_guard.audit_command_log(log_path)
+                        if violations:
+                            logger.warning(
+                                f"Cline {task_id}: safety audit found {len(violations)} violation(s)"
+                            )
+                            self.task_manager.db.update_task_field(
+                                task_id,
+                                safety_violations=json.dumps(violations, ensure_ascii=False)
+                            )
+                    except Exception as e:
+                        logger.debug(f"Cline {task_id}: audit skipped ({e})")
+
         if self.task_manager:
             try:
                 task = self.task_manager.get_task(task_id)
@@ -445,7 +466,8 @@ class ClineExecutor:
 
                                     self.task_manager.transition(task_id, "CLINE_STARTING",
                                                                   trigger="stall_retry")
-                                    await self.spawn(task)
+                                    # Use _spawn_locked to avoid re-acquiring the same asyncio.Lock
+                                    await self._spawn_locked(task)
                                 else:
                                     self.task_manager.transition(task_id, "CLINE_STALLED",
                                                                   trigger="stall_terminal")

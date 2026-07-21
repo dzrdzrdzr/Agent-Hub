@@ -147,6 +147,54 @@ class SafetyGuard:
             targets.append(m.group(1))
         return targets
 
+    def audit_command_log(self, log_path: str) -> List[str]:
+        """Post-hoc audit of executed commands in Cline output log.
+        
+        Scans the log for dangerous commands that were actually run.
+        Returns list of violations found.
+        """
+        violations = []
+        if not os.path.exists(log_path):
+            return violations
+
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                # Read last 50KB — enough for recent session
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 51200))
+                content = f.read()
+
+            for pattern in self.DESTRUCTIVE_PATTERNS:
+                for m in re.finditer(pattern, content, re.IGNORECASE):
+                    # Extract surrounding context
+                    start = max(0, m.start() - 40)
+                    end = min(len(content), m.end() + 40)
+                    context = content[start:end].replace('\n', ' ').strip()
+                    violations.append(
+                        f"destructive_pattern:{pattern} at pos {m.start()}: ...{context}..."
+                    )
+
+            # Check for writes outside workspace
+            for m in re.finditer(r'(?:>|>>)\s*(/[a-zA-Z/].*)', content):
+                path_out = m.group(1).strip()
+                full = self._resolve_path(path_out, self.workspace_root)
+                if full and not self._path_within(full, self.workspace_root):
+                    violations.append(f"write_outside_workspace: {path_out}")
+
+            # Check for network operations in non-network mode
+            if not self.allow_network:
+                net_patterns = [r'curl\s+', r'wget\s+', r'pip\s+install',
+                               r'npm\s+install', r'git\s+clone']
+                for np in net_patterns:
+                    if re.search(np, content, re.IGNORECASE):
+                        violations.append(f"network_access_in_offline_mode: {np}")
+
+        except Exception as e:
+            violations.append(f"audit_error: {e}")
+
+        return violations
+
     def _detects_symlink_escape(self, command: str) -> bool:
         """Rough check for symlink-based path escape attempts."""
         return bool(re.search(r"ln\s+-s.*\.\.", command, re.IGNORECASE))
