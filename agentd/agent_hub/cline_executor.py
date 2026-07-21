@@ -352,16 +352,36 @@ class ClineExecutor:
         self._processes.pop(task_id, None)
         self._pids.pop(task_id, None)
 
+        # Step 2: fetch task for log paths and result validation
+        task = self.task_manager.get_task(task_id) if self.task_manager else None
+        stdout_path = task.get("log_stdout", "") if task else ""
+
+        # Step 3: flush/fsync output before reading
+        if stdout_path and os.path.exists(stdout_path):
+            try:
+                with open(stdout_path, "ab") as f:
+                    os.fsync(f.fileno())
+            except Exception:
+                pass
+
+        # Step 4-5: validate output before classifying
+        result = ClineResult.FAILED
+        result_file_missing = False
         if exit_code == 0:
-            result = ClineResult.SUCCEEDED
+            result_file = task.get("result_file", "") if task else ""
+            if result_file and os.path.exists(result_file) and os.path.getsize(result_file) > 0:
+                result = ClineResult.SUCCEEDED
+            elif stdout_path and os.path.exists(stdout_path) and os.path.getsize(stdout_path) > 0:
+                result = ClineResult.SUCCEEDED
+            else:
+                result_file_missing = True
+                logger.warning(f"Cline {task_id}: exit_code=0 but no output files found")
         else:
             result = ClineResult.FAILED
 
         logger.info(f"Cline {task_id}: exit_code={exit_code}, result={result}")
 
-        # Run post-hoc command audit on Cline log
         if self.safety_guard:
-            task = self.task_manager.get_task(task_id) if self.task_manager else None
             if task:
                 log_path = task.get("log_stdout", "")
                 if log_path and os.path.exists(log_path):
@@ -380,12 +400,14 @@ class ClineExecutor:
 
         if self.task_manager:
             try:
-                task = self.task_manager.get_task(task_id)
                 self.task_manager.db.update_task_field(task_id, cline_exit_code=exit_code)
 
                 if result == ClineResult.SUCCEEDED:
                     self.task_manager.transition(task_id, "CLINE_SUCCEEDED",
                                                   trigger="cline_exit_zero")
+                elif result_file_missing:
+                    self.task_manager.transition(task_id, "CLINE_FAILED",
+                                                  trigger="cline_exit_zero_no_output")
                 else:
                     task = self.task_manager.get_task(task_id)
                     if task["retry_count"] < task["max_retries"]:

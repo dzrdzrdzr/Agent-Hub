@@ -62,14 +62,27 @@ class TrainingManager:
     async def request_training(self, task: Dict[str, Any],
                                training_cmd: str, training_cwd: str = "",
                                env_vars: dict = None) -> Dict[str, Any]:
-        """Request training from a Cline task's structured result."""
+        """Request training from a Cline task's structured result. Idempotent."""
         task_id = task["id"]
         training_id = self.training_task_id(task_id)
         cwd = training_cwd or task.get("cline_cwd") or os.getcwd()
 
-        # Create training task linked to parent
+        # Idempotency: check if training task already exists
+        existing = self.db.get_task(training_id)
+        if existing:
+            train_state = existing.get("training_state", "")
+            if train_state in ("TRAINING_RUNNING", "TRAINING_STARTING"):
+                logger.info(f"Training {training_id}: already {train_state}, not restarting")
+                return existing
+            if train_state in ("TRAINING_COMPLETED", "RESULT_READY"):
+                logger.info(f"Training {training_id}: already {train_state}, reusing")
+                return existing
+            if train_state in ("TRAINING_FAILED", "TRAINING_STALLED"):
+                logger.info(f"Training {training_id}: was {train_state}, allowing retry")
+
+        # Create or update training task linked to parent
         tm = self.task_manager
-        if tm:
+        if tm and not existing:
             training_task = tm.create_task(
                 task_id=training_id,
                 task_type="training",
@@ -79,7 +92,7 @@ class TrainingManager:
                 task_sequence=task.get("task_sequence", 0),
             )
         else:
-            training_task = {"id": training_id, "state": "TRAINING_QUEUED"}
+            training_task = existing or {"id": training_id, "state": "TRAINING_QUEUED"}
 
         # Store training config on the Cline task
         env_json = json.dumps(env_vars) if env_vars else None
@@ -138,33 +151,96 @@ class TrainingManager:
         stdout_path = os.path.join(logs_dir, f"{task_id}.stdout.log")
         stderr_path = os.path.join(logs_dir, f"{task_id}.stderr.log")
 
-        # Parse command
-        import shlex
-        cmd_parts = shlex.split(cmd)
+        # Parse command: support both structured {argv, cwd, env} and legacy string
+        try:
+            cmd_config = json.loads(cmd)
+            if isinstance(cmd_config, dict) and "argv" in cmd_config:
+                cmd_parts = cmd_config["argv"]
+                spawn_cwd = cmd_config.get("cwd", cwd)
+                spawn_env = dict(env)
+                if "env" in cmd_config and isinstance(cmd_config["env"], dict):
+                    spawn_env.update(cmd_config["env"])
+                cwd = spawn_cwd
+                env = spawn_env
+                logger.info(f"Training using structured argv: {cmd_parts[:3]}...")
+            else:
+                # Fallback: string command
+                import shlex
+                cmd_parts = shlex.split(cmd)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            import shlex
+            cmd_parts = shlex.split(cmd)
+
+        # Reject dangerous shell constructs
+        cmd_str = " ".join(cmd_parts) if cmd_parts else ""
+        dangerous = ["|", ">", "<", "&&", "||", ";", "`", "$("]
+        for d in dangerous:
+            if d in cmd_str:
+                logger.error(f"Training {task_id}: rejected dangerous shell construct: {d}")
+                # Close log files before failing
+                self.db.update_task_field(task_id, training_state="TRAINING_FAILED",
+                                           error_summary=f"rejected_shell_construct: {d}")
+                if self.event_manager:
+                    task = self.db.get_task(task_id)
+                    goal_id = task.get("goal_id") if task else None
+                    self.event_manager.emit_event(
+                        "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                        payload={"reason": f"rejected_shell_construct: {d}"}
+                    )
+                return "failed", {"error": f"rejected_shell_construct: {d}"}
 
         logger.info(f"Spawning training: {' '.join(cmd_parts[:3])}... (task={task_id}, run={run_id})")
 
         # Open log files
-        stdout_f = open(stdout_path, "w")
-        stderr_f = open(stderr_path, "w")
+        try:
+            stdout_f = open(stdout_path, "w")
+            stderr_f = open(stderr_path, "w")
+        except OSError as e:
+            logger.error(f"Training {task_id}: cannot open log files: {e}")
+            return "failed", {"error": str(e)}
 
         # Spawn as new process group so it survives parent exit
-        if sys.platform != "win32":
-            process = await asyncio.create_subprocess_exec(
-                *cmd_parts,
-                stdout=stdout_f, stderr=stderr_f,
-                cwd=cwd, env=env,
-                preexec_fn=os.setsid  # new session → survives Cline exit
-            )
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_parts,
-                stdout=stdout_f, stderr=stderr_f,
-                cwd=cwd, env=env,
-                creationflags=0x00000200  # CREATE_NEW_PROCESS_GROUP on Windows
-            )
+        try:
+            if sys.platform != "win32":
+                process = await asyncio.create_subprocess_exec(
+                    *cmd_parts,
+                    stdout=stdout_f, stderr=stderr_f,
+                    cwd=cwd, env=env,
+                    preexec_fn=os.setsid  # new session → survives Cline exit
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd_parts,
+                    stdout=stdout_f, stderr=stderr_f,
+                    cwd=cwd, env=env,
+                    creationflags=0x00000200  # CREATE_NEW_PROCESS_GROUP on Windows
+                )
+        except Exception as e:
+            logger.error(f"Training {task_id}: process creation failed: {e}")
+            stdout_f.close()
+            stderr_f.close()
+            self.db.update_task_field(task_id, training_state="TRAINING_FAILED",
+                                       error_summary=f"process_creation_failed: {e}")
+            if self.event_manager:
+                task = self.db.get_task(task_id)
+                goal_id = task.get("goal_id") if task else None
+                self.event_manager.emit_event(
+                    "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                    payload={"reason": f"process_creation_failed: {str(e)[:200]}"}
+                )
+            return "failed", {"error": str(e)}
 
         pid = process.pid
+
+        # Transition through TRAINING_STARTING → TRAINING_RUNNING
+        if self.task_manager:
+            tm_task = self.task_manager.get_task(task_id)
+            if tm_task:
+                try:
+                    self.task_manager.transition(task_id, "TRAINING_STARTING",
+                                                  trigger="training_spawn_start")
+                except ValueError:
+                    pass
 
         # Store training state on task
         self.db.update_task_field(
@@ -175,6 +251,13 @@ class TrainingManager:
             metrics_path=os.path.join(cwd, ".agent-hub", "training_results", f"{task_id}", "metrics.json"),
             training_state="TRAINING_RUNNING",
         )
+
+        if self.task_manager:
+            try:
+                self.task_manager.transition(task_id, "TRAINING_RUNNING",
+                                              trigger="training_spawned")
+            except ValueError:
+                pass
 
         self._processes[task_id] = {
             "pid": pid, "process": process, "run_id": run_id,

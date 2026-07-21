@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -148,6 +148,8 @@ CREATE INDEX IF NOT EXISTS idx_events_goal ON events(goal_id);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_unack ON events(acknowledged, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_idempotency ON events(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_goal ON model_calls(goal_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_training ON tasks(training_state);
 """
@@ -272,6 +274,20 @@ class Database:
                 pass
             try:
                 conn.execute("ALTER TABLE tasks ADD COLUMN safety_violations TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+        if from_version < 5:
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_idempotency ON events(idempotency_key)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id)"
+                )
             except sqlite3.OperationalError:
                 pass
 
@@ -509,6 +525,7 @@ class Database:
         return self.fetch_one("SELECT * FROM events WHERE event_id = ?", (event_id,))
 
     def get_unacknowledged_events(self, goal_id: str = None,
+                                   task_id: str = None,
                                    event_types: List[str] = None,
                                    after_version: int = 0,
                                    limit: int = 10) -> List[Dict[str, Any]]:
@@ -519,6 +536,10 @@ class Database:
         if goal_id:
             conditions.append("goal_id = ?")
             params.append(goal_id)
+
+        if task_id:
+            conditions.append("task_id = ?")
+            params.append(task_id)
 
         if event_types:
             placeholders = ",".join("?" * len(event_types))
@@ -542,9 +563,10 @@ class Database:
             return cur.rowcount > 0
 
     def get_next_event(self, goal_id: str = None,
+                       task_id: str = None,
                        event_types: List[str] = None) -> Optional[Dict[str, Any]]:
         results = self.get_unacknowledged_events(
-            goal_id=goal_id, event_types=event_types, limit=1
+            goal_id=goal_id, task_id=task_id, event_types=event_types, limit=1
         )
         return results[0] if results else None
 

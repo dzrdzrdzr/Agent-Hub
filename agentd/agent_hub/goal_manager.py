@@ -85,7 +85,7 @@ class GoalManager:
                 )
                 new_state = "GOAL_FAILED"
                 trigger = f"{trigger}_failure_limit"
-            elif goal["iteration_count"] >= goal["max_iterations"]:
+            elif goal["iteration_count"] > goal["max_iterations"]:
                 logger.warning(
                     f"Goal {goal_id}: iterations={goal['iteration_count']} >= "
                     f"max={goal['max_iterations']}, forcing GOAL_FAILED"
@@ -116,21 +116,24 @@ class GoalManager:
 
     def set_skip_next_plan(self, goal_id: str):
         """Flag that the next loop iteration should skip planning."""
-        self.db.execute(
-            "UPDATE goals SET skip_next_plan = 1 WHERE id = ?", (goal_id,)
-        )
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET skip_next_plan = 1 WHERE id = ?", (goal_id,)
+            )
 
     def set_orchestrator_step(self, goal_id: str, step: str):
         """Persist current orchestrator step for recovery after restart."""
-        self.db.execute(
-            "UPDATE goals SET orchestrator_step = ? WHERE id = ?", (step, goal_id)
-        )
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET orchestrator_step = ? WHERE id = ?", (step, goal_id)
+            )
 
     def clear_skip_next_plan(self, goal_id: str):
         """Clear the skip-next-plan flag."""
-        self.db.execute(
-            "UPDATE goals SET skip_next_plan = 0 WHERE id = ?", (goal_id,)
-        )
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET skip_next_plan = 0 WHERE id = ?", (goal_id,)
+            )
 
     def set_latest_decision(self, goal_id: str, decision: dict):
         self.db.update_goal_field(

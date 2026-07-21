@@ -84,8 +84,11 @@ class GoalOrchestrator:
 
     async def _run_loop(self, goal_id: str):
         """Main orchestration loop for a goal."""
-        lock = self._get_lock(goal_id)
+        async with self._get_lock(goal_id):
+            await self._run_loop_locked(goal_id)
 
+    async def _run_loop_locked(self, goal_id: str):
+        """Actual loop logic, called under per-goal lock."""
         closing_event = "GOAL_FAILED"  # default outcome, overridden on success
 
         try:
@@ -298,6 +301,13 @@ class GoalOrchestrator:
                         reason=f"safety_blocked: {safety_result.details}")
                     logger.error(f"Goal {goal_id}: safety blocked task {task_id}")
                     return
+                if getattr(safety_result, 'requires_approval', False):
+                    self.task_manager.transition(task_id, "WAITING_APPROVAL",
+                                                  trigger="safety_requires_approval")
+                    self.event_manager.emit_event("WAITING_APPROVAL", goal_id=goal_id,
+                                                   task_id=task_id)
+                    logger.warning(f"Goal {goal_id}: task {task_id} requires safety approval")
+                    return
 
             try:
                 run_id, info = await self.cline_executor.spawn(task)
@@ -331,11 +341,19 @@ class GoalOrchestrator:
             task = self.task_manager.get_task(task_id)
             if task and task["state"] in ("CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED"):
                 event_type = task["state"]
-                self.event_manager.emit_event(event_type, goal_id=goal_id, task_id=task_id,
-                                               payload={"exit_code": task.get("cline_exit_code")})
+                run_id = task.get("run_id", "")
+                idemp_key = f"{event_type}:{task_id}:{run_id}" if run_id else None
+                emitted = self.event_manager.emit_event(
+                    event_type, goal_id=goal_id, task_id=task_id,
+                    payload={"exit_code": task.get("cline_exit_code")},
+                    idempotency_key=idemp_key,
+                )
+                if emitted is None:
+                    logger.info(f"Goal {goal_id}: task {event_type} event already emitted (idempotent)")
+                else:
+                    logger.info(f"Goal {goal_id}: task already {event_type}, emitted event")
                 if event_type in ("CLINE_FAILED", "CLINE_STALLED"):
                     self.goal_manager.increment_failure(goal_id)
-                logger.info(f"Goal {goal_id}: task already {event_type}, emitted event")
                 return
 
         # Wait for event with configurable timeout, looping until task resolves
@@ -370,9 +388,18 @@ class GoalOrchestrator:
                 task = self.task_manager.get_task(task_id)
                 if task and task["state"] in ("CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED"):
                     event_type = task["state"]
-                    self.event_manager.emit_event(event_type, goal_id=goal_id, task_id=task_id)
-                    logger.info(f"Goal {goal_id}: task state is {event_type} after timeout "
-                                f"(loop {loop_i + 1}/{max_loops})")
+                    run_id = task.get("run_id", "")
+                    idemp_key = f"{event_type}:{task_id}:{run_id}" if run_id else None
+                    emitted = self.event_manager.emit_event(
+                        event_type, goal_id=goal_id, task_id=task_id,
+                        idempotency_key=idemp_key,
+                    )
+                    if emitted is None:
+                        logger.info(f"Goal {goal_id}: task state is {event_type} after timeout "
+                                    f"(loop {loop_i + 1}/{max_loops}), already emitted")
+                    else:
+                        logger.info(f"Goal {goal_id}: task state is {event_type} after timeout "
+                                    f"(loop {loop_i + 1}/{max_loops})")
                     if event_type in ("CLINE_FAILED", "CLINE_STALLED"):
                         self.goal_manager.increment_failure(goal_id)
                     return
@@ -380,6 +407,25 @@ class GoalOrchestrator:
 
         # Exhausted all wait loops — task truly stuck
         logger.warning(f"Goal {goal_id}: exhausted {max_loops} wait loops for Cline")
+        # Verify process ownership and stop managed Cline
+        if self.cline_executor and task_id:
+            pid = None
+            task = self.task_manager.get_task(task_id)
+            if task:
+                pid = task.get("cline_pid")
+            if pid:
+                from agent_hub.process_watcher import verify_process_identity, terminate_process_tree
+                is_ours, reason = verify_process_identity(task)
+                if is_ours:
+                    terminate_process_tree(pid, timeout=3.0)
+                    self.task_manager.transition(task_id, "CLINE_STALLED",
+                                                  trigger="wait_exhausted_stall")
+                else:
+                    self.task_manager.transition(task_id, "CLINE_FAILED",
+                                                  trigger="wait_exhausted_pid_mismatch")
+            else:
+                self.task_manager.transition(task_id, "CLINE_FAILED",
+                                              trigger="wait_exhausted_no_pid")
         self.goal_manager.increment_failure(goal_id)
 
     async def _step_training(self, goal_id: str):
@@ -401,23 +447,55 @@ class GoalOrchestrator:
         self.goal_manager.set_orchestrator_step(goal_id, "training")
 
         training_cmd = task.get("training_command", "")
-        if training_cmd:
-            train_task = await self.training_manager.request_training(
-                task, training_cmd,
-                training_cwd=task.get("training_cwd") or "",
-            )
-            await self.training_manager.spawn(train_task)
-            logger.info(f"Goal {goal_id}: training spawned for task {train_task['id']}")
+        if not training_cmd:
+            self.goal_manager.fail_goal(goal_id, reason="training_requested_but_no_command")
+            self.event_manager.emit_event("TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                                           payload={"reason": "no_training_command"})
+            logger.error(f"Goal {goal_id}: training_requested=true but training_command is empty")
+            return
 
-            # Wait for training completion
-            train_event = await self.event_manager.wait_for_event(
-                goal_id=goal_id,
-                event_types=["TRAINING_COMPLETED", "TRAINING_FAILED",
-                             "TRAINING_STALLED", "RESULT_READY"],
-                timeout=7200,
-            )
-            if train_event:
-                self.event_manager.acknowledge(train_event["event_id"], "orchestrator")
+        train_task = await self.training_manager.request_training(
+            task, training_cmd,
+            training_cwd=task.get("training_cwd") or "",
+        )
+        await self.training_manager.spawn(train_task)
+        logger.info(f"Goal {goal_id}: training spawned for task {train_task['id']}")
+
+        # Wait for training completion with proper state checking
+        config_timeout = 7200
+        if self.cline_executor and hasattr(self.cline_executor, 'config'):
+            config_timeout = getattr(self.cline_executor.config.cline, 'timeout_seconds', 7200)
+
+        train_event = await self.event_manager.wait_for_event(
+            goal_id=goal_id,
+            task_id=train_task['id'],
+            event_types=["TRAINING_COMPLETED", "TRAINING_FAILED",
+                         "TRAINING_STALLED", "RESULT_READY"],
+            timeout=config_timeout,
+        )
+        if train_event:
+            self.event_manager.acknowledge(train_event["event_id"], "orchestrator")
+            event_type = train_event["event_type"]
+            if event_type in ("TRAINING_FAILED", "TRAINING_STALLED"):
+                logger.warning(f"Goal {goal_id}: training ended with {event_type}, stopping round")
+                return
+            elif event_type == "TRAINING_COMPLETED":
+                # Wait for RESULT_READY before proceeding to review
+                result_event = await self.event_manager.wait_for_event(
+                    goal_id=goal_id,
+                    task_id=train_task['id'],
+                    event_types=["RESULT_READY", "TRAINING_FAILED", "TRAINING_STALLED"],
+                    timeout=config_timeout,
+                )
+                if result_event:
+                    self.event_manager.acknowledge(result_event["event_id"], "orchestrator")
+                    if result_event["event_type"] != "RESULT_READY":
+                        logger.warning(f"Goal {goal_id}: training completed but result not ready "
+                                       f"({result_event['event_type']}), stopping round")
+                        return
+                else:
+                    logger.warning(f"Goal {goal_id}: training completed but RESULT_READY timeout")
+                    return
 
     async def _step_review(self, goal_id: str) -> bool:
         """Codex reviews results and decides next step."""
@@ -452,7 +530,7 @@ class GoalOrchestrator:
             self.db.complete_model_call(call_id, "completed", result.verdict)
 
             self.event_manager.emit_event(
-                "CODEX_REVIEW_REQUIRED",
+                "CODEX_REVIEW_COMPLETED",
                 goal_id=goal_id, task_id=task_id,
                 payload={"verdict": result.verdict}
             )
@@ -496,9 +574,20 @@ class GoalOrchestrator:
 
     async def _build_result_package(self, goal: Dict[str, Any],
                                      task: Dict[str, Any]) -> dict:
-        """Build result package using ResultPackager for Codex review."""
+        """Build result package using ResultPackager for Codex review.
+        Includes both Cline task and training sub-task results."""
         if task:
-            pkg = await self.result_packager.build_package(goal, task)
+            # Find training sub-task if it exists
+            training_task = None
+            if self.training_manager and task.get("training_requested"):
+                train_id = self.training_manager.training_task_id(task["id"])
+                if train_id and self.task_manager:
+                    training_task = self.task_manager.get_task(train_id)
+                    if training_task:
+                        logger.info(f"Goal {goal['id']}: including training task {train_id} "
+                                    f"state={training_task.get('training_state')}")
+
+            pkg = await self.result_packager.build_package(goal, task, training_results=training_task)
             # Also write to file for Codex CLI consumption
             self.result_packager.generate_review_package_file(pkg)
             return pkg
@@ -525,9 +614,38 @@ class GoalOrchestrator:
 
     async def cancel_goal(self, goal_id: str):
         """Cancel a goal."""
+        # Stop managed Cline process
+        if self.cline_executor:
+            goal = self.goal_manager.get_goal(goal_id)
+            if goal:
+                task_id = goal.get("current_task_id")
+                if task_id:
+                    try:
+                        await self.cline_executor.stop(task_id)
+                    except Exception as e:
+                        logger.warning(f"Goal {goal_id}: error stopping Cline {task_id}: {e}")
+
+        # Stop managed training process
+        if self.training_manager:
+            goal = self.goal_manager.get_goal(goal_id)
+            if goal:
+                task_id = goal.get("current_task_id")
+                if task_id:
+                    train_id = self.training_manager.training_task_id(task_id)
+                    try:
+                        await self.training_manager.stop(train_id)
+                    except Exception as e:
+                        logger.warning(f"Goal {goal_id}: error stopping training {train_id}: {e}")
+
+        # Cancel waiter and orchestrator
         goal = self.goal_manager.get_goal(goal_id)
         if goal:
-            self.goal_manager.cancel_goal(goal_id)
+            if goal["state"] not in ("GOAL_CANCELLED", "GOAL_COMPLETED", "GOAL_FAILED"):
+                self.goal_manager.cancel_goal(goal_id)
+
+        # Emit only GOAL_CANCELLED, never GOAL_FAILED
+        self.event_manager.emit_event("GOAL_CANCELLED", goal_id=goal_id)
+
         task = self._active_orchestrations.pop(goal_id, None)
         if task:
             task.cancel()

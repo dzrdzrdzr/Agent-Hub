@@ -18,7 +18,7 @@ KEY_EVENT_TYPES = {
     "CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED",
     "TRAINING_COMPLETED", "TRAINING_FAILED", "TRAINING_STALLED",
     "RESULT_READY", "CODEX_REVIEW_REQUIRED",
-    "GOAL_COMPLETED", "GOAL_FAILED"
+    "GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED"
 }
 
 NON_KEY_EVENT_TYPES = {
@@ -73,7 +73,7 @@ class EventManager:
         """Emit event related to a task state change."""
         goal_id = task.get("goal_id")
         task_id = task["id"]
-        idemp_key = f"{event_type}:{task_id}:{task.get('state', '')}"
+        idemp_key = f"{event_type}:{task_id}:{task.get('run_id', '')}"
 
         return self.emit_event(
             event_type=event_type,
@@ -86,11 +86,13 @@ class EventManager:
     # ---- Event query ----
 
     def get_unacknowledged(self, goal_id: str = None,
+                           task_id: str = None,
                            event_types: List[str] = None,
                            after_version: int = 0,
                            limit: int = 50) -> List[Dict[str, Any]]:
         return self.db.get_unacknowledged_events(
             goal_id=goal_id,
+            task_id=task_id,
             event_types=event_types,
             after_version=after_version,
             limit=limit,
@@ -122,14 +124,13 @@ class EventManager:
         types_to_wait = event_types or list(KEY_EVENT_TYPES)
         existing = self.get_unacknowledged(
             goal_id=goal_id,
+            task_id=task_id,
             event_types=types_to_wait,
             after_version=after_version,
             limit=1,
         )
         if existing:
-            e = existing[0]
-            if task_id is None or e.get("task_id") == task_id:
-                return e
+            return existing[0]
 
         # No existing events — create a waiter
         waiter_id = f"waiter-{uuid.uuid4().hex[:8]}"
@@ -160,18 +161,29 @@ class EventManager:
 
     def _notify_waiters(self, event_type: str, goal_id: str = None,
                          task_id: str = None):
-        """Notify waiters matching this event."""
+        """Notify waiters matching this event.
+
+        Matching rules:
+        - If waiter specifies task_id, only matching task_id events wake it.
+        - If waiter does NOT specify task_id, any event for the goal wakes it.
+        - If event has no task_id, only waiters without task_id filter match.
+        """
         for waiter_id, waiter in list(self._waiters.items()):
             if waiter["goal_id"] and waiter["goal_id"] != goal_id:
                 continue
-            if waiter.get("task_id") and task_id and waiter["task_id"] != task_id:
-                continue
+            w_task_id = waiter.get("task_id")
+            if w_task_id:
+                # Waiter specified task_id — event must have matching task_id
+                if not task_id or task_id != w_task_id:
+                    continue
+            # If waiter didn't specify task_id, accept any task_id (or None)
             if event_type not in waiter["event_types"]:
                 continue
 
             # Get the latest matching event
             event = self.db.get_next_event(
                 goal_id=waiter["goal_id"],
+                task_id=waiter.get("task_id"),
                 event_types=list(waiter["event_types"]),
             )
             if event:

@@ -351,12 +351,14 @@ class IPCServer:
             return {"error": "event_manager_not_available"}
 
         goal_id = params.get("goal_id")
+        task_id = params.get("task_id")
         event_types = params.get("event_types")
         after_version = params.get("after_version", 0)
         timeout = params.get("timeout")  # seconds, None = indefinite
 
         event = await self.event_manager.wait_for_event(
             goal_id=goal_id,
+            task_id=task_id,
             event_types=event_types,
             after_version=after_version,
             timeout=timeout,
@@ -375,10 +377,11 @@ class IPCServer:
 
     async def _h_get_events(self, params):
         goal_id = params.get("goal_id")
+        task_id = params.get("task_id")
         event_types = params.get("event_types")
         limit = params.get("limit", 50)
         events = self.event_manager.get_unacknowledged(
-            goal_id=goal_id, event_types=event_types, limit=limit
+            goal_id=goal_id, task_id=task_id, event_types=event_types, limit=limit
         )
         return {"events": events}
 
