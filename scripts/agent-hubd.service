@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Hub Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/agent-hub/.venv/bin/python -B -u -m agent_hub.main
+WorkingDirectory=%h/.local/share/agent-hub
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=%h/.local/share/agent-hub/agentd
+Environment=AGENT_HUB_HOME=%h/.local/share/agent-hub
+
+[Install]
+WantedBy=default.target

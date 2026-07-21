@@ -1,8 +1,8 @@
-# Stop GAUSS Agent Control Center daemon (Windows)
+# Stop Agent Hub daemon (Windows)
 $found = $false
 Get-Process python -ErrorAction SilentlyContinue | ForEach-Object {
     try {
-        if ($_.CommandLine -like "*gauss_agentd*") {
+        if ($_.CommandLine -like "*agent_hub*") {
             $_ | Stop-Process -Force
             Write-Host "Stopped PID $($_.Id)"
             $found = $true

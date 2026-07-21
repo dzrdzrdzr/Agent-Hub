@@ -1,7 +1,7 @@
 import os, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from gauss_agentd.db import Database
-from gauss_agentd.task_manager import TaskManager, is_valid_transition, is_terminal
+from agent_hub.db import Database
+from agent_hub.task_manager import TaskManager, is_valid_transition, is_terminal
 
 def test_transitions():
     assert is_valid_transition("QUEUED", "CLINE_STARTING")

@@ -1,6 +1,6 @@
 @echo off
-REM Start GAUSS Agent Control Center daemon (Windows)
+REM Start Agent Hub daemon (Windows)
 cd /d "%~dp0\.."
-echo Starting gauss-agentd...
-python -m agentd.gauss_agentd.main
+echo Starting agent-hub daemon...
+python -m agentd.agent_hub.main
 pause

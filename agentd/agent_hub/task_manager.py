@@ -18,11 +18,11 @@ VALID_STATES = {
 
 # Valid state transitions
 TRANSITIONS = {
-    "QUEUED": {"CLINE_STARTING"},
-    "CLINE_STARTING": {"CLINE_RUNNING", "CLINE_FAILED"},
+    "QUEUED": {"CLINE_STARTING", "CANCELLED"},
+    "CLINE_STARTING": {"CLINE_RUNNING", "CLINE_FAILED", "CANCELLED"},
     "CLINE_RUNNING": {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "WAITING_APPROVAL", "CANCELLED"},
-    "CLINE_FAILED": {"CLINE_STARTING", "CANCELLED"},  # CLINE_STARTING only if retry_count < max_retries
-    "CLINE_STALLED": {"CLINE_STARTING", "CANCELLED"},  # CLINE_STARTING only if retry_count < max_retries
+    "CLINE_FAILED": {"CLINE_STARTING", "CANCELLED"},
+    "CLINE_STALLED": {"CLINE_STARTING", "CANCELLED"},
     "CLINE_SUCCEEDED": set(),  # terminal
     "WAITING_APPROVAL": {"CLINE_STARTING", "CANCELLED"},
     "CANCELLED": set(),  # terminal
@@ -30,6 +30,9 @@ TRANSITIONS = {
 
 # States that are terminal
 TERMINAL_STATES = {"CLINE_SUCCEEDED", "CANCELLED", "CLINE_FAILED", "CLINE_STALLED"}
+
+# States considered "active" for monitoring
+ACTIVE_STATES = {"QUEUED", "CLINE_STARTING", "CLINE_RUNNING", "WAITING_APPROVAL"}
 
 
 def is_terminal(state: str) -> bool:
@@ -104,14 +107,29 @@ class TaskManager:
     def get_all_tasks(self) -> List[Dict[str, Any]]:
         return self.db.get_all_tasks()
 
+    def get_all_tasks_sql(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get tasks with SQL-level pagination."""
+        return self.db.get_all_tasks(limit=limit, offset=offset)
+
     def get_active_tasks(self) -> List[Dict[str, Any]]:
-        active = {"QUEUED", "CLINE_STARTING", "CLINE_RUNNING", "WAITING_APPROVAL"}
-        all_tasks = self.db.get_all_tasks()
-        return [t for t in all_tasks if t["state"] in active]
+        """Get active tasks using SQL-side filter (efficient)."""
+        states = tuple(ACTIVE_STATES)
+        return self.db.get_tasks_by_states(states)
+
+    def get_active_tasks_sql(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get active tasks with SQL-level filter and pagination."""
+        states = tuple(ACTIVE_STATES)
+        return self.db.get_tasks_by_states(states, limit=limit, offset=offset)
+
+    def get_active_count(self) -> int:
+        """Count active tasks efficiently."""
+        states = tuple(ACTIVE_STATES)
+        return self.db.count_tasks_by_states(states)
 
     def get_recoverable_tasks(self) -> List[Dict[str, Any]]:
         """Tasks that need recovery after daemon restart."""
-        return self.db.get_tasks_by_state("CLINE_STARTING") +                self.db.get_tasks_by_state("CLINE_RUNNING")
+        return (self.db.get_tasks_by_state("CLINE_STARTING") +
+                self.db.get_tasks_by_state("CLINE_RUNNING"))
 
     def cancel_task(self, task_id: str) -> Dict[str, Any]:
         return self.transition(task_id, "CANCELLED", trigger="user_cancelled")

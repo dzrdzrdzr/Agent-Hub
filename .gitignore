@@ -1,4 +1,5 @@
 .agent-control/
+.agent-hub/
 *.pyc
 __pycache__/
 *.egg-info/
