@@ -74,9 +74,9 @@ print("Training completed. loss=0.05 acc=0.95")
             {
                 "verdict": "plan_ready",
                 "next_task": {
-                    "prompt": "Run training with python train.py",
+                    "prompt": "Run training with python3 train.py",
                     "task_type": "cline_exec",
-                    "training_command": f"python {training_script} {tmp}/results",
+                    "training_command": f"python3 {training_script} {tmp}/results",
                 },
                 "goal_complete": False,
                 "reasoning": "iteration 1 plan with training",
@@ -115,7 +115,7 @@ print("Training completed. loss=0.05 acc=0.95")
             # Inject structured_result with training_command from the plan
             # The next_task from the plan has training_command
             # We need to store it on the Cline task
-            train_cmd = f"python {training_script} {tmp}/results"
+            train_cmd = f"python3 {training_script} {tmp}/results"
             db.update_task_field(task_id, structured_result=json.dumps({
                 "training_command": train_cmd,
                 "changed_files": ["train.py"],
@@ -202,14 +202,14 @@ print("Done")
 
         # First request_training
         train1 = await training_manager.request_training(
-            parent, f"python {training_script} {tmp}/r1",
+            parent, f"python3 {training_script} {tmp}/r1",
         )
         assert train1 is not None
         train_id = train1["id"]
 
         # Second request_training — should return existing (idempotent)
         train2 = await training_manager.request_training(
-            parent, f"python {training_script} {tmp}/r1",
+            parent, f"python3 {training_script} {tmp}/r1",
         )
         assert train2 is not None
         assert train2["id"] == train_id, "Second request should return same training task"
@@ -264,7 +264,7 @@ print("Training completed. loss=0.1 acc=0.9", flush=True)
 
         # Request and spawn training
         train_task = await training_manager.request_training(
-            parent, f"python {training_script} {tmp}/r2",
+            parent, f"python3 {training_script} {tmp}/r2",
         )
         run_id, info = await training_manager.spawn(train_task)
 
@@ -328,7 +328,7 @@ async def test_no_duplicate_training_on_recovery():
 output_dir = sys.argv[1] if len(sys.argv) > 1 else "/tmp"
 os.makedirs(output_dir, exist_ok=True)
 print("Training started...", flush=True)
-time.sleep(3)
+time.sleep(1)
 with open(os.path.join(output_dir, "result.json"), "w") as f:
     json.dump({"loss": 0.05}, f)
 print("Done", flush=True)
@@ -340,7 +340,7 @@ print("Done", flush=True)
         )
 
         train_task = await training_manager.request_training(
-            parent, f"python {training_script} {tmp}/r3",
+            parent, f"python3 {training_script} {tmp}/r3",
         )
 
         # First spawn
@@ -355,10 +355,13 @@ print("Done", flush=True)
         assert pid2 == pid1, \
             f"Second spawn should not create new process: {pid1} vs {pid2}"
 
-        # Clean up
+        # Clean up — cancel monitor and wait for process exit
+        await training_manager.shutdown()
         import psutil
         try:
-            psutil.Process(pid1).terminate()
+            proc = psutil.Process(pid1)
+            proc.terminate()
+            proc.wait(timeout=5)
         except Exception:
             pass
 
@@ -382,9 +385,9 @@ async def test_training_extract_cmd_from_structured_result():
         )
 
         # Test 1: structured_result with training_command
-        task1 = {"structured_result": json.dumps({"training_command": "python train.py --epochs 10"})}
+        task1 = {"structured_result": json.dumps({"training_command": "python3 train.py --epochs 10"})}
         cmd = orchestrator._extract_training_cmd(task1)
-        assert cmd == "python train.py --epochs 10"
+        assert cmd == "python3 train.py --epochs 10"
 
         # Test 2: no training_command
         task2 = {"structured_result": json.dumps({"changed_files": ["a.py"]})}
@@ -399,10 +402,10 @@ async def test_training_extract_cmd_from_structured_result():
         # Test 4: from log file
         log_path = os.path.join(tmp, "test.log")
         with open(log_path, "w") as f:
-            f.write('Some output\n```json\n{"training_command": "python train.py"}\n```\nMore output\n')
+            f.write('Some output\n```json\n{"training_command": "python3 train.py"}\n```\nMore output\n')
         task4 = {"log_stdout": log_path, "structured_result": ""}
         cmd = orchestrator._extract_training_cmd(task4)
-        assert cmd == "python train.py"
+        assert cmd == "python3 train.py"
 
         db.close()
 

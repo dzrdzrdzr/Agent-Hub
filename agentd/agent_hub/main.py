@@ -9,7 +9,7 @@ import signal
 from .config import load_config, resolve_cline_path, get_cline_version
 from .db import Database
 from .task_manager import TaskManager
-from .cline_executor import ClineExecutor
+from .cline_executor import ClineExecutor, MockClineExecutor
 from .server import IPCServer
 from .safety_guard import SafetyGuard
 from .budget_tracker import BudgetTracker
@@ -189,7 +189,11 @@ async def main():
     task_manager = TaskManager(db)
     budget_tracker = BudgetTracker(db)
     safety_guard = SafetyGuard(config.safety, workspace_root=cwd)
-    cline_executor = ClineExecutor(config, task_manager=task_manager, safety_guard=safety_guard)
+    if config.cline.mock:
+        cline_executor = MockClineExecutor(config, task_manager=task_manager)
+        logger.info("  Cline: mock (explicitly enabled)")
+    else:
+        cline_executor = ClineExecutor(config, task_manager=task_manager, safety_guard=safety_guard)
     goal_manager = GoalManager(db)
     event_manager = EventManager(db)
     training_manager = TrainingManager(
@@ -199,17 +203,10 @@ async def main():
         logs_dir=config.logs.dir,
     )
 
-    # Codex executor
+    # Codex executor — mock mode overrides real CLI discovery
     codex_path = resolve_codex_path()
-    if codex_path:
-        codex_executor = CodexExecutor(
-            codex_path=codex_path,
-            timeout=config.cline.timeout_seconds,
-            budget_tracker=budget_tracker,
-        )
-        logger.info(f"  Codex: {codex_path}")
-    elif config.cline.mock:
-        # Mock only when explicitly enabled via config (never silent fallback)
+    if config.cline.mock:
+        # Mock mode explicitly enabled — always use mock regardless of PATH
         codex_executor = MockCodexExecutor(plan_sequence=[
             {"verdict": "plan_ready",
              "next_task": {"prompt": "mock task: implement feature",
@@ -222,7 +219,14 @@ async def main():
              "goal_complete": True,
              "reasoning": "mock: goal achieved after 2 iterations"},
         ])
-        logger.warning("  Codex: mock (explicitly enabled, no real CLI found)")
+        logger.info(f"  Codex: mock (cli available: {bool(codex_path)})")
+    elif codex_path:
+        codex_executor = CodexExecutor(
+            codex_path=codex_path,
+            timeout=config.cline.timeout_seconds,
+            budget_tracker=budget_tracker,
+        )
+        logger.info(f"  Codex: {codex_path}")
     else:
         codex_executor = None
         logger.error("  Codex: NOT FOUND. Goals requiring planning/review will FAIL. "
