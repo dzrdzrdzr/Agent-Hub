@@ -71,6 +71,14 @@
         "command": "agent-hub.openTaskLog",
         "title": "Agent Hub: Open Raw Output Log",
         "icon": "$(file-text)"
+      },
+      {
+        "command": "agent-hub.startGoal",
+        "title": "Agent Hub: Start Goal"
+      },
+      {
+        "command": "agent-hub.refreshGoals",
+        "title": "Agent Hub: Refresh Goals"
       }
     ],
     "menus": {
@@ -105,9 +113,12 @@
     "views": {
       "agent-hub": [
         {
+          "id": "agent-hub.goals",
+          "name": "Goals"
+        },
+        {
           "id": "agent-hub.tasks",
-          "name": "Tasks",
-          "contextualTitle": "Agent Hub"
+          "name": "Tasks"
         }
       ]
     },

@@ -15,6 +15,11 @@ from .safety_guard import SafetyGuard
 from .budget_tracker import BudgetTracker
 from .recovery import run_recovery
 from .process_watcher import check_process_alive
+from .goal_manager import GoalManager
+from .event_manager import EventManager
+from .training_manager import TrainingManager
+from .goal_orchestrator import GoalOrchestrator
+from .codex_executor import CodexExecutor, MockCodexExecutor, resolve_codex_path
 
 
 def setup_logging(log_dir: str):
@@ -170,15 +175,67 @@ async def main():
     budget_tracker = BudgetTracker(db)
     safety_guard = SafetyGuard(config.safety, workspace_root=cwd)
     cline_executor = ClineExecutor(config, task_manager=task_manager)
+    goal_manager = GoalManager(db)
+    event_manager = EventManager(db)
+    training_manager = TrainingManager(
+        db, task_manager=task_manager,
+        stall_threshold=config.cline.stall_threshold_seconds,
+        logs_dir=config.logs.dir,
+    )
+
+    # Codex executor
+    codex_path = resolve_codex_path()
+    if codex_path:
+        codex_executor = CodexExecutor(
+            codex_path=codex_path,
+            timeout=config.cline.timeout_seconds,
+            budget_tracker=budget_tracker,
+        )
+        logger.info(f"  Codex: {codex_path}")
+    else:
+        codex_executor = MockCodexExecutor(plan_sequence=[
+            {"verdict": "plan_ready",
+             "next_task": {"prompt": "mock task: implement feature",
+                           "task_type": "cline_exec",
+                           "training_expected": False},
+             "goal_complete": False,
+             "reasoning": "mock plan"},
+            {"verdict": "goal_achieved",
+             "next_task": None,
+             "goal_complete": True,
+             "reasoning": "mock: goal achieved after 2 iterations"},
+        ])
+        logger.info("  Codex: mock (no real CLI found)")
+
+    # Orchestrator
+    orchestrator = GoalOrchestrator(
+        db=db, goal_manager=goal_manager, event_manager=event_manager,
+        task_manager=task_manager, cline_executor=cline_executor,
+        training_manager=training_manager, codex_executor=codex_executor,
+        event_wait_timeout=config.cline.stall_threshold_seconds,
+    )
+    logger.info("  Orchestrator initialized")
+
+    # Wire events into task transitions
+    _wire_events(task_manager, event_manager, cline_executor)
 
     # Run recovery (with executor for re-attaching monitors)
     logger.info("Running recovery...")
-    recovered = await run_recovery(db, task_manager, cline_executor=cline_executor)
+    recovered = await run_recovery(
+        db, task_manager, cline_executor=cline_executor,
+        event_manager=event_manager, training_manager=training_manager,
+        goal_manager=goal_manager, orchestrator=orchestrator,
+    )
     for r in recovered:
         logger.info(f"  Recovery: {r}")
 
+    # Recover orchestrator for active goals
+    await orchestrator.recover()
+
     # Start IPC server
-    server = IPCServer(config, task_manager, cline_executor, budget_tracker, safety_guard)
+    server = IPCServer(config, task_manager, cline_executor, budget_tracker, safety_guard,
+                       goal_manager=goal_manager, event_manager=event_manager,
+                       training_manager=training_manager, orchestrator=orchestrator)
     await server.start()
     logger.info(f"  IPC server started ({config.ipc.transport})")
 
@@ -226,10 +283,32 @@ async def main():
         pass
     finally:
         logger.info("Shutting down...")
+        await orchestrator.shutdown()
+        await training_manager.shutdown()
         await cline_executor.shutdown()
         await server.stop()
         db.close()
         logger.info("Daemon stopped.")
+
+
+def _wire_events(task_manager, event_manager, cline_executor):
+    """Wire event emission into task state transitions.
+
+    Spawn events are emitted here; classify events are emitted directly
+    within ClineExecutor._classify_exit via self._event_manager.
+    """
+    cline_executor._event_manager = event_manager
+
+    original_spawn = cline_executor.spawn
+
+    async def spawn_with_events(task):
+        result = await original_spawn(task)
+        event_manager.emit_task_related_event(
+            "CLINE_RUNNING", task, {"spawned": True}
+        )
+        return result
+
+    cline_executor.spawn = spawn_with_events
 
 
 def run():

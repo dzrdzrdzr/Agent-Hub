@@ -4,7 +4,7 @@ agentd:
     tcp_host: 127.0.0.1
     tcp_port: 19876
   cline:
-    executable: auto
+    executable: /data7/hanzaidao/miniconda3/envs/GAUSS-SSC/bin/cline
     timeout_seconds: 600
     stall_threshold_seconds: 300
     max_retries: 1

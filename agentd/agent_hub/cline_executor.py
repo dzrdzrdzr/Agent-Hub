@@ -10,8 +10,11 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 
+import json
 import psutil
 import time
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 from .config import AgentdConfig, resolve_cline_path, cmd_hash, load_cline_extension_config
 from .process_watcher import terminate_process_tree
@@ -86,11 +89,13 @@ class ClineExecutor:
     def __init__(self, config: AgentdConfig, task_manager=None):
         self.config = config
         self.task_manager = task_manager
+        self._event_manager = None  # set by main._wire_events
         self._running = {}       # task_id -> asyncio.Task (_wait_exit)
-        self._processes = {}     # task_id -> asyncio.subprocess.Process
+        self._processes = {}     # task_id -> subprocess.Popen
         self._stall_tasks = {}   # task_id -> asyncio.Task (stall monitor)
         self._locks = {}         # task_id -> asyncio.Lock (per-task serialization)
         self._pids = {}          # task_id -> int (for recovery reattach)
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cline-spawn")
 
     def _get_lock(self, task_id: str) -> asyncio.Lock:
         if task_id not in self._locks:
@@ -111,7 +116,6 @@ class ClineExecutor:
         """Build Cline CLI command list (no shell string)."""
         return [
             cline_path,
-            "-p",
             "-c", cwd,
             "--timeout", str(self.config.cline.timeout_seconds),
             "--auto-approve", "true",
@@ -155,27 +159,33 @@ class ClineExecutor:
 
         logger.info(f"Spawning Cline: {' '.join(cmd)} (task={task_id}, run={run_id})")
 
+        # Open log files for stdout/stderr redirect
+        stdout_f = open(stdout_path, "w")
+        stderr_f = open(stderr_path, "w")
+
         try:
-            # Spawn async subprocess in its own process group
+            # Use subprocess.Popen in thread to avoid asyncio pipe/SIGCHLD issues
             kwargs: Dict[str, Any] = dict(
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                stdout=stdout_f,
+                stderr=stderr_f,
                 cwd=cwd,
                 env=env,
             )
             if sys.platform != "win32":
-                kwargs["start_new_session"] = True
-            else:
-                kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
-            process = await asyncio.create_subprocess_exec(*cmd, **kwargs)
+                kwargs["preexec_fn"] = os.setpgrp
+            loop = asyncio.get_event_loop()
+            process = await loop.run_in_executor(
+                self._executor, lambda: subprocess.Popen(cmd, **kwargs))
         except FileNotFoundError as e:
+            stdout_f.close(); stderr_f.close()
             logger.error(f"Cline executable not found for task {task_id}: {e}")
             if self.task_manager:
                 self.task_manager.db.update_task_field(task_id, error_summary=f"spawn_failed: {e}")
                 self.task_manager.transition(task_id, "CLINE_FAILED", trigger="spawn_exec_not_found")
             raise
         except Exception as e:
+            stdout_f.close(); stderr_f.close()
             logger.error(f"Failed to spawn Cline for task {task_id}: {e}")
             if self.task_manager:
                 self.task_manager.db.update_task_field(task_id, error_summary=f"spawn_failed: {e}")
@@ -191,18 +201,25 @@ class ClineExecutor:
         self._processes[task_id] = process
         self._pids[task_id] = process.pid
 
-        # Start pipe readers to filter ANSI and write to log files
-        async def _read_pipe(stream, log_path, task_id):
-            with open(log_path, "w", encoding="utf-8") as lf:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    lf.write(_strip_ansi(line.decode("utf-8", errors="replace")))
-                    lf.flush()
-
-        asyncio.create_task(_read_pipe(process.stdout, stdout_path, task_id))
-        asyncio.create_task(_read_pipe(process.stderr, stderr_path, task_id))
+        # Wait for exit, close files, and strip ANSI from logs
+        async def _close_files():
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._executor, process.wait)
+            stdout_f.close()
+            stderr_f.close()
+            # Strip ANSI escape codes from log files (Cline outputs rich terminal codes)
+            def _filter_ansi():
+                for log_path in (stdout_path, stderr_path):
+                    try:
+                        with open(log_path, 'r', encoding='utf-8', errors='replace') as lf:
+                            raw = lf.read()
+                        cleaned = _strip_ansi(raw)
+                        with open(log_path, 'w', encoding='utf-8') as lf:
+                            lf.write(cleaned)
+                    except Exception:
+                        pass
+            await loop.run_in_executor(self._executor, _filter_ansi)
+        asyncio.create_task(_close_files())
 
         # Capture process identity
         try:
@@ -219,7 +236,7 @@ class ClineExecutor:
             "cline_pid": process.pid,
             "cline_start_time": start_time,
             "cline_cmd_hash": cmd_hash(cmd),  # keep for legacy compatibility
-            "cline_cmdline": cmdline,           # NEW: actual cmdline for tail match
+            "cline_cmdline": json.dumps(cmdline),  # serialize list to JSON for SQLite
             "cline_cwd": cwd,
             "cline_ppid": ppid,
             "run_id": run_id,
@@ -297,12 +314,18 @@ class ClineExecutor:
         logger.info(f"Recovery monitor attached: task={task_id}, pid={pid}")
 
     async def _wait_exit(self, task_id: str, process):
-        """Wait for Cline process to exit, then classify result."""
+        """Wait for Cline process to exit, then classify result.
+
+        Uses ThreadPoolExecutor to run subprocess.Popen.wait() in a thread,
+        avoiding asyncio's subprocess SIGCHLD issues with shebang scripts.
+        """
+        exit_code = -1
         try:
-            exit_code = await process.wait()
+            loop = asyncio.get_event_loop()
+            exit_code = await loop.run_in_executor(
+                self._executor, process.wait)
         except Exception as e:
             logger.error(f"Error waiting for Cline {task_id}: {e}")
-            exit_code = -1
 
         # Hold per-task lock to serialize with stall/retry/stop paths
         lock = self._get_lock(task_id)
@@ -348,7 +371,7 @@ class ClineExecutor:
                         self.task_manager.transition(task_id, "CLINE_STARTING",
                                                       trigger="auto_retry")
                         # Re-spawn (under a new lock acquisition in spawn())
-                        await self.spawn(task)
+                        await self._spawn_locked(task)
                         self.task_manager.transition(task_id, "CLINE_RUNNING",
                                                       trigger="retry_spawned")
                     else:
@@ -356,6 +379,23 @@ class ClineExecutor:
                                                       trigger="cline_exit_nonzero_terminal")
             except Exception as e:
                 logger.error(f"Error classifying Cline exit {task_id}: {e}")
+
+        # Emit event for orchestrator
+        if self._event_manager:
+            try:
+                task = self.task_manager.get_task(task_id) if self.task_manager else None
+                if task:
+                    state = task.get("state", "")
+                    event_type = {
+                        "CLINE_SUCCEEDED": "CLINE_SUCCEEDED",
+                        "CLINE_FAILED": "CLINE_FAILED",
+                        "CLINE_STALLED": "CLINE_STALLED",
+                    }.get(state, state)
+                    if event_type:
+                        self._event_manager.emit_task_related_event(
+                            event_type, task, {"exit_code": exit_code})
+            except Exception as e:
+                logger.error(f"Error emitting classify event {task_id}: {e}")
 
     async def _monitor_stall_loop(self, task_id: str, stdout_path: str, stderr_path: str):
         """Looping stall monitor: checks every stall_threshold/2 seconds

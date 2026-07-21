@@ -1,4 +1,4 @@
-"""Task manager with state machine engine."""
+"""Task manager with state machine engine v0.3 — goals, training states."""
 
 import uuid
 import logging
@@ -9,30 +9,45 @@ from .db import Database
 
 logger = logging.getLogger(__name__)
 
-# Phase 1 valid states
 VALID_STATES = {
     "QUEUED", "CLINE_STARTING", "CLINE_RUNNING",
     "CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED",
-    "WAITING_APPROVAL", "CANCELLED"
+    "WAITING_APPROVAL", "CANCELLED",
+    # Training states
+    "TRAINING_QUEUED", "TRAINING_STARTING", "TRAINING_RUNNING",
+    "TRAINING_COMPLETED", "TRAINING_FAILED", "TRAINING_STALLED",
+    "RESULT_ANALYZING", "RESULT_READY",
 }
 
-# Valid state transitions
 TRANSITIONS = {
-    "QUEUED": {"CLINE_STARTING", "CANCELLED"},
+    "QUEUED": {"CLINE_STARTING", "CANCELLED", "TRAINING_STARTING"},
     "CLINE_STARTING": {"CLINE_RUNNING", "CLINE_FAILED", "CANCELLED"},
-    "CLINE_RUNNING": {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "WAITING_APPROVAL", "CANCELLED"},
+    "CLINE_RUNNING": {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED",
+                       "WAITING_APPROVAL", "CANCELLED"},
     "CLINE_FAILED": {"CLINE_STARTING", "CANCELLED"},
     "CLINE_STALLED": {"CLINE_STARTING", "CANCELLED"},
-    "CLINE_SUCCEEDED": set(),  # terminal
+    "CLINE_SUCCEEDED": set(),
     "WAITING_APPROVAL": {"CLINE_STARTING", "CANCELLED"},
-    "CANCELLED": set(),  # terminal
+    "CANCELLED": set(),
+    # Training transitions
+    "TRAINING_QUEUED": {"TRAINING_STARTING", "CANCELLED"},
+    "TRAINING_STARTING": {"TRAINING_RUNNING", "TRAINING_FAILED", "CANCELLED"},
+    "TRAINING_RUNNING": {"TRAINING_COMPLETED", "TRAINING_FAILED",
+                          "TRAINING_STALLED", "CANCELLED"},
+    "TRAINING_COMPLETED": {"RESULT_ANALYZING", "CANCELLED"},
+    "TRAINING_FAILED": set(),
+    "TRAINING_STALLED": set(),
+    "RESULT_ANALYZING": {"RESULT_READY", "CANCELLED"},
+    "RESULT_READY": set(),
 }
 
-# States that are terminal
-TERMINAL_STATES = {"CLINE_SUCCEEDED", "CANCELLED", "CLINE_FAILED", "CLINE_STALLED"}
+TERMINAL_STATES = {"CLINE_SUCCEEDED", "CANCELLED", "CLINE_FAILED", "CLINE_STALLED",
+                   "TRAINING_COMPLETED", "TRAINING_FAILED", "TRAINING_STALLED",
+                   "RESULT_READY"}
 
-# States considered "active" for monitoring
-ACTIVE_STATES = {"QUEUED", "CLINE_STARTING", "CLINE_RUNNING", "WAITING_APPROVAL"}
+ACTIVE_STATES = {"QUEUED", "CLINE_STARTING", "CLINE_RUNNING", "WAITING_APPROVAL",
+                 "TRAINING_QUEUED", "TRAINING_STARTING", "TRAINING_RUNNING",
+                 "RESULT_ANALYZING"}
 
 
 def is_terminal(state: str) -> bool:
@@ -50,10 +65,9 @@ class TaskManager:
 
     def __init__(self, db: Database):
         self.db = db
-        self._callbacks = {}  # event_type -> list of async callbacks
+        self._callbacks = {}
 
     def on(self, event: str, callback):
-        """Register callback for state change events."""
         self._callbacks.setdefault(event, []).append(callback)
 
     async def _emit(self, event: str, task: Dict[str, Any]):
@@ -65,14 +79,18 @@ class TaskManager:
 
     def create_task(self, task_type: str = "cline_exec", prompt: str = "",
                     priority: int = 0, max_retries: int = 1,
-                    cline_exe_path: str = "") -> Dict[str, Any]:
+                    cline_exe_path: str = "",
+                    goal_id: str = None, parent_task_id: str = None,
+                    task_sequence: int = 0) -> Dict[str, Any]:
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         task = self.db.create_task(
             task_id=task_id, task_type=task_type, prompt=prompt,
             priority=priority, max_retries=max_retries,
-            cline_exe_path=cline_exe_path
+            cline_exe_path=cline_exe_path,
+            goal_id=goal_id, parent_task_id=parent_task_id,
+            task_sequence=task_sequence,
         )
-        logger.info(f"Task created: {task_id}")
+        logger.info(f"Task created: {task_id} (type={task_type})")
         return task
 
     def transition(self, task_id: str, new_state: str, trigger: str = "",
@@ -87,7 +105,6 @@ class TaskManager:
                 f"Invalid transition: {old_state} -> {new_state} for task {task_id}"
             )
 
-        # Retry logic: CLINE_FAILED/STALLED -> CLINE_STARTING only if under max
         if old_state in ("CLINE_FAILED", "CLINE_STALLED") and new_state == "CLINE_STARTING":
             if task["retry_count"] >= task["max_retries"]:
                 raise ValueError(
@@ -108,28 +125,24 @@ class TaskManager:
         return self.db.get_all_tasks()
 
     def get_all_tasks_sql(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get tasks with SQL-level pagination."""
         return self.db.get_all_tasks(limit=limit, offset=offset)
 
     def get_active_tasks(self) -> List[Dict[str, Any]]:
-        """Get active tasks using SQL-side filter (efficient)."""
         states = tuple(ACTIVE_STATES)
         return self.db.get_tasks_by_states(states)
 
     def get_active_tasks_sql(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get active tasks with SQL-level filter and pagination."""
         states = tuple(ACTIVE_STATES)
         return self.db.get_tasks_by_states(states, limit=limit, offset=offset)
 
     def get_active_count(self) -> int:
-        """Count active tasks efficiently."""
         states = tuple(ACTIVE_STATES)
         return self.db.count_tasks_by_states(states)
 
     def get_recoverable_tasks(self) -> List[Dict[str, Any]]:
-        """Tasks that need recovery after daemon restart."""
         return (self.db.get_tasks_by_state("CLINE_STARTING") +
-                self.db.get_tasks_by_state("CLINE_RUNNING"))
+                self.db.get_tasks_by_state("CLINE_RUNNING") +
+                self.db.get_tasks_by_state("TRAINING_RUNNING"))
 
     def cancel_task(self, task_id: str) -> Dict[str, Any]:
         return self.transition(task_id, "CANCELLED", trigger="user_cancelled")

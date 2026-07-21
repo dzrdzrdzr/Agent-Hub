@@ -13,6 +13,8 @@ export interface AgentHubApi {
     /** Submit a task to the daemon. Returns the task id. */
     submitTask(prompt: string, options?: { cwd?: string }): Promise<string>;
     cancelTask(taskId: string): Promise<void>;
+    startGoal(objective: string, options?: { max_iterations?: number; max_failures?: number }): Promise<any>;
+    waitForEvent(goalId?: string, eventTypes?: string[], timeout?: number): Promise<any>;
     getStatus(): Promise<any>;
     /** Fired when the daemon reports a task state change. */
     onDidChangeState: vscode.Event<{ task_id: string; state: string }>;
@@ -22,6 +24,7 @@ let output: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
 let client: DaemonClient;
 let provider: TaskTreeProvider;
+let goalsProvider: GoalTreeProvider;
 let hubState: 'starting' | 'connected' | 'stopped' = 'stopped';
 let lastError = '';
 let activeCount = 0;
@@ -96,6 +99,20 @@ class DaemonClient {
     constructor(private getPort: () => number) { }
 
     get connected(): boolean { return !!this.socket && !this.socket.destroyed; }
+
+    async waitForEvent(goalId?: string, eventTypes?: string[], timeout?: number): Promise<any> {
+        const reqTimeout = timeout ? timeout + 10000 : 3600000;
+        return this.request('wait_for_event', {
+            goal_id: goalId,
+            event_types: eventTypes,
+            timeout,
+        }, reqTimeout);
+    }
+
+    async acknowledgeEvent(eventId: string): Promise<boolean> {
+        const r = await this.request('acknowledge_event', { event_id: eventId }, 5000);
+        return r?.acknowledged === true;
+    }
 
     ensureConnected(): Promise<void> {
         if (this.connected) return Promise.resolve();
@@ -242,9 +259,47 @@ class TaskTreeProvider implements vscode.TreeDataProvider<TaskItem> {
             return tasks.map((t: any) => {
                 const id = t.id || '';
                 const state = t.state || 'UNKNOWN';
-                const label = `${id.slice(-12)} [${state}]`;
-                const prompt = (t.prompt || '').slice(0, 80);
-                return new TaskItem(label, prompt, state, id);
+                const prompt = (t.prompt || '').slice(0, 60);
+                const exitCode = t.cline_exit_code;
+                const pid = t.cline_pid;
+                const retry = `${t.retry_count || 0}/${t.max_retries || 0}`;
+                const training = t.training_state || '';
+                const goalId = t.goal_id;
+
+                // Build rich label
+                let label = `${id.slice(-12)}`;
+                if (exitCode !== null && exitCode !== undefined) {
+                    label += ` exit=${exitCode}`;
+                }
+                if (state === 'CLINE_RUNNING' && pid) {
+                    label += ` pid=${pid}`;
+                }
+
+                // Build description line
+                const parts: string[] = [state];
+                if (training) parts.push(`train:${training}`);
+                parts.push(`retry:${retry}`);
+                const desc = parts.join(' | ');
+
+                // Build tooltip
+                const tt: string[] = [
+                    `**Task**: ${id}`,
+                    `**State**: ${state}`,
+                    `**Prompt**: ${prompt}`,
+                ];
+                if (exitCode !== null && exitCode !== undefined) tt.push(`**Exit**: ${exitCode}`);
+                if (pid) tt.push(`**PID**: ${pid}`);
+                if (goalId) tt.push(`**Goal**: ${goalId.slice(-12)}`);
+                if (training) tt.push(`**Training**: ${training}`);
+                tt.push(`**Retries**: ${retry}`);
+
+                const item = new TaskItem(label, desc, state, id, tt);
+                item.exitCode = exitCode;
+                item.pid = pid;
+                item.trainingState = training;
+                item.goalId = goalId;
+                item.retryInfo = retry;
+                return item;
             });
         } catch {
             return [
@@ -255,14 +310,20 @@ class TaskTreeProvider implements vscode.TreeDataProvider<TaskItem> {
 }
 
 class TaskItem extends vscode.TreeItem {
+    trainingState?: string;
+    exitCode?: number;
+    goalId?: string;
+    pid?: number;
+    retryInfo?: string;
     constructor(
         public readonly label: string,
         public readonly description: string,
         public readonly state: string,
         public readonly taskId?: string,
+        public readonly tooltipLines: string[] = [],
     ) {
         super(label, vscode.TreeItemCollapsibleState.None);
-        this.tooltip = description || state;
+        this.tooltip = new vscode.MarkdownString(tooltipLines.join('  \n'));
         this.contextValue = taskId ? 'task' : 'status';
         // Icon mapping
         switch (state) {
@@ -272,6 +333,9 @@ class TaskItem extends vscode.TreeItem {
             case 'CLINE_STALLED': this.iconPath = new vscode.ThemeIcon('warning'); break;
             case 'CANCELLED': this.iconPath = new vscode.ThemeIcon('circle-slash'); break;
             case 'WAITING_APPROVAL': this.iconPath = new vscode.ThemeIcon('key'); break;
+            case 'TRAINING_RUNNING': this.iconPath = new vscode.ThemeIcon('beaker'); break;
+            case 'TRAINING_SUCCEEDED': this.iconPath = new vscode.ThemeIcon('beaker'); break;
+            case 'TRAINING_FAILED': this.iconPath = new vscode.ThemeIcon('warning'); break;
             default: this.iconPath = new vscode.ThemeIcon('circle-outline');
         }
         if (taskId) {
@@ -453,6 +517,59 @@ async function openTaskLog(taskId?: string, logPath?: string): Promise<void> {
     vscode.window.showInformationMessage('Agent Hub: no session log yet — the task has not produced output.');
 }
 
+
+// ---- Goals Tree View ----
+class GoalItem extends vscode.TreeItem {
+    constructor(
+        public readonly goalId: string,
+        label: string,
+        state: string,
+        public readonly iterationCount: number,
+        public readonly failureCount: number,
+        public readonly taskCount: number,
+        public readonly maxIterations: number,
+        public readonly maxFailures: number,
+        public readonly modelCalls: number,
+        collapsibleState: vscode.TreeItemCollapsibleState,
+    ) {
+        super(label, collapsibleState);
+        this.description = `${state} | iter=${iterationCount}/${maxIterations} | fail=${failureCount}/${maxFailures} | tasks=${taskCount} | mcalls=${modelCalls}`;
+        this.contextValue = 'goal';
+        if (state === 'GOAL_COMPLETED') { this.iconPath = new vscode.ThemeIcon('check'); }
+        else if (state === 'GOAL_FAILED' || state === 'GOAL_CANCELLED') { this.iconPath = new vscode.ThemeIcon('error'); }
+        else if (state.includes('EXECUTING') || state.includes('RUNNING')) {
+            this.iconPath = new vscode.ThemeIcon('sync~spin');
+        }
+        else { this.iconPath = new vscode.ThemeIcon('circle-outline'); }
+    }
+}
+
+class GoalTreeProvider implements vscode.TreeDataProvider<GoalItem> {
+    private _onDidChange = new vscode.EventEmitter<GoalItem | undefined>();
+    readonly onDidChangeTreeData = this._onDidChange.event;
+
+    refresh(): void { this._onDidChange.fire(undefined); }
+
+    async getChildren(element?: GoalItem): Promise<GoalItem[]> {
+        if (element) { return []; }
+        if (!client.connected) { return []; }
+        try {
+            const r = await client.request('list_goals', { include_terminal: false }, 5000);
+            const goals = r?.goals || [];
+            return goals.map((g: any) => new GoalItem(
+                g.id, g.objective?.slice(0, 60) || g.id,
+                g.state, g.iteration_count || 0, g.failure_count || 0,
+                (g.tasks?.length) || 0,
+                g.max_iterations || 5, g.max_failures || 3,
+                g.accumulated_model_calls || 0,
+                vscode.TreeItemCollapsibleState.None,
+            ));
+        } catch { return []; }
+    }
+
+    getTreeItem(element: GoalItem): GoalItem { return element; }
+}
+
 export function activate(context: vscode.ExtensionContext): AgentHubApi {
     output = vscode.window.createOutputChannel('Agent Hub');
     statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -460,6 +577,7 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
     statusBar.show();
     client = new DaemonClient(() => port());
     provider = new TaskTreeProvider();
+	goalsProvider = new GoalTreeProvider();
 
     const api: AgentHubApi = {
         version: '0.2.3',
@@ -473,6 +591,20 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
             await client.request('cancel_task', { task_id: taskId });
             debouncedRefresh();
         },
+        startGoal: async (objective: string, options?: { max_iterations?: number; max_failures?: number }) => {
+            await ensureDaemon(true);
+            const r = await client.request('start_goal', {
+                objective,
+                max_iterations: options?.max_iterations ?? 5,
+                max_failures: options?.max_failures ?? 3,
+            }, 15000);
+            debouncedRefresh();
+            goalsProvider.refresh();
+            return r;
+        },
+        waitForEvent: (goalId?: string, eventTypes?: string[], timeout?: number) => {
+            return client.waitForEvent(goalId, eventTypes, timeout);
+        },
         getStatus: () => client.request('get_status', {}, 5000),
         onDidChangeState: client.onDidChangeState,
     };
@@ -481,6 +613,28 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
         output,
         statusBar,
         vscode.window.registerTreeDataProvider(VIEW_ID, provider),
+        vscode.window.registerTreeDataProvider('agent-hub.goals', goalsProvider),
+        vscode.commands.registerCommand('agent-hub.startGoal', async () => {
+            const objective = await vscode.window.showInputBox({
+                prompt: 'Goal objective',
+                placeHolder: 'Describe the research goal...',
+            });
+            if (!objective) return;
+            try {
+                await ensureDaemon(true);
+                const r = await client.request('start_goal', {
+                    objective,
+                    max_iterations: 5,
+                    max_failures: 3,
+                }, 15000);
+                vscode.window.showInformationMessage(`Agent Hub: goal ${r.id.slice(-12)} started`);
+                debouncedRefresh();
+                goalsProvider.refresh();
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Agent Hub: ${e?.message || e}`);
+            }
+        }),
+        vscode.commands.registerCommand('agent-hub.refreshGoals', () => goalsProvider.refresh()),
         vscode.commands.registerCommand('agent-hub.submitTask', async (arg?: any) => {
             let prompt: string | undefined;
             let cwd: string | undefined;
@@ -538,9 +692,11 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
     client.onDidChangeConnection((up) => {
         setStatus(up ? 'connected' : 'stopped');
         debouncedRefresh();
+        goalsProvider.refresh();
     });
     client.onDidChangeState((e) => {
         debouncedRefresh();
+        goalsProvider.refresh();
         if (sessionTaskId && e.task_id === sessionTaskId) void renderSession();
     });
 

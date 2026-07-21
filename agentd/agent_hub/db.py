@@ -1,4 +1,4 @@
-"""SQLite database management with schema, migrations, and atomic writes."""
+"""SQLite database management with schema v3: goals, events, training, model_calls."""
 
 import os
 import sqlite3
@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -17,13 +17,17 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
+    goal_id TEXT,
+    parent_task_id TEXT,
     task_type TEXT NOT NULL DEFAULT 'cline_exec',
+    task_sequence INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'QUEUED',
     cline_exe_path TEXT,
     cline_pid INTEGER,
     cline_exit_code INTEGER,
     cline_cmd_hash TEXT,
+    cline_cmdline TEXT,
     cline_start_time REAL,
     cline_cwd TEXT,
     cline_ppid INTEGER,
@@ -34,11 +38,75 @@ CREATE TABLE IF NOT EXISTS tasks (
     log_stdout TEXT,
     log_stderr TEXT,
     result_file TEXT,
+    structured_result TEXT,
+    training_requested INTEGER NOT NULL DEFAULT 0,
+    training_command TEXT,
+    training_cwd TEXT,
+    training_env TEXT,
+    gpu_requirements TEXT,
+    training_pid INTEGER,
+    training_log TEXT,
+    output_path TEXT,
+    metrics_path TEXT,
+    training_state TEXT,
+    training_exit_code INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     started_at TEXT,
     completed_at TEXT,
     error_summary TEXT,
     review_required INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    objective TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'GOAL_CREATED',
+    current_task_id TEXT,
+    task_sequence INTEGER NOT NULL DEFAULT 0,
+    completion_criteria TEXT,
+    stop_conditions TEXT,
+    latest_codex_decision TEXT,
+    max_iterations INTEGER NOT NULL DEFAULT 10,
+    max_failures INTEGER NOT NULL DEFAULT 3,
+    iteration_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    model_call_budget INTEGER NOT NULL DEFAULT 100,
+    accumulated_model_calls INTEGER NOT NULL DEFAULT 0,
+    review_mode TEXT NOT NULL DEFAULT 'auto',
+    pending_event_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    completed_at TEXT,
+    error_summary TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    goal_id TEXT,
+    task_id TEXT,
+    event_type TEXT NOT NULL,
+    payload TEXT,
+    state_version INTEGER NOT NULL DEFAULT 1,
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    acknowledged_at TEXT,
+    handled_by TEXT,
+    idempotency_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id TEXT,
+    task_id TEXT,
+    model_role TEXT NOT NULL,
+    reason TEXT,
+    start_time TEXT NOT NULL,
+    end_time TEXT,
+    status TEXT NOT NULL DEFAULT 'started',
+    estimated_usage INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    result_summary TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_transitions (
@@ -71,6 +139,14 @@ CREATE TABLE IF NOT EXISTS kv_store (
 CREATE INDEX IF NOT EXISTS idx_transitions_task ON state_transitions(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id);
+CREATE INDEX IF NOT EXISTS idx_goals_state ON goals(state);
+CREATE INDEX IF NOT EXISTS idx_events_goal ON events(goal_id);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_unack ON events(acknowledged, created_at);
+CREATE INDEX IF NOT EXISTS idx_model_calls_goal ON model_calls(goal_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_training ON tasks(training_state);
 """
 
 
@@ -109,19 +185,84 @@ class Database:
     def _run_migrations(self, conn, from_version: int, to_version: int):
         """Run schema migrations."""
         if from_version < 2:
-            # v1 -> v2: add indexes
             try:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)"
                 )
             except sqlite3.OperationalError:
                 pass
+        if from_version < 3:
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN goal_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN task_sequence INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN structured_result TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_requested INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_command TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_cwd TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_env TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN gpu_requirements TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_pid INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_log TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN output_path TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN metrics_path TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_state TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN training_exit_code INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN cline_cmdline TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_training ON tasks(training_state)")
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.db_path)
             self._local.conn.row_factory = sqlite3.Row
-            # Apply per-connection pragmas
             self._local.conn.execute("PRAGMA busy_timeout=5000")
         return self._local.conn
 
@@ -160,14 +301,16 @@ class Database:
 
     def create_task(self, task_id: str, task_type: str = "cline_exec",
                     prompt: str = "", priority: int = 0, max_retries: int = 1,
-                    cline_exe_path: str = "") -> Dict[str, Any]:
+                    cline_exe_path: str = "", goal_id: str = None,
+                    parent_task_id: str = None, task_sequence: int = 0) -> Dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as conn:
             conn.execute(
-                """INSERT INTO tasks (id, task_type, priority, state, prompt,
-                   max_retries, cline_exe_path, created_at)
-                   VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, ?)""",
-                (task_id, task_type, priority, prompt, max_retries, cline_exe_path, now)
+                """INSERT INTO tasks (id, task_type, prompt, priority, max_retries,
+                   cline_exe_path, state, created_at, goal_id, parent_task_id, task_sequence)
+                   VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)""",
+                (task_id, task_type, prompt, priority, max_retries,
+                 cline_exe_path, now, goal_id, parent_task_id, task_sequence)
             )
             self._log_transition(conn, task_id, None, "QUEUED", "task_created")
         return self.get_task(task_id)
@@ -175,35 +318,31 @@ class Database:
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self.fetch_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
 
+    def get_all_tasks(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+        return self.fetch_all(
+            "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+
     def get_tasks_by_state(self, state: str) -> List[Dict[str, Any]]:
         return self.fetch_all("SELECT * FROM tasks WHERE state = ?", (state,))
 
-    def get_all_tasks(self, limit: int = None, offset: int = 0) -> List[Dict[str, Any]]:
-        if limit is not None:
-            return self.fetch_all(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset)
-            )
-        return self.fetch_all("SELECT * FROM tasks ORDER BY created_at DESC")
-
-    def get_tasks_by_states(self, states: tuple, limit: int = None,
-                             offset: int = 0) -> List[Dict[str, Any]]:
-        """Get tasks matching any of the given states (SQL-side filter)."""
+    def get_tasks_by_states(self, states: tuple, limit: int = 200,
+                            offset: int = 0) -> List[Dict[str, Any]]:
         placeholders = ",".join("?" * len(states))
-        if limit is not None:
-            return self.fetch_all(
-                f"SELECT * FROM tasks WHERE state IN ({placeholders}) "
-                f"ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (*states, limit, offset)
-            )
         return self.fetch_all(
             f"SELECT * FROM tasks WHERE state IN ({placeholders}) "
-            f"ORDER BY created_at DESC",
-            states
+            f"ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            list(states) + [limit, offset]
+        )
+
+    def get_tasks_by_goal(self, goal_id: str) -> List[Dict[str, Any]]:
+        return self.fetch_all(
+            "SELECT * FROM tasks WHERE goal_id = ? ORDER BY task_sequence",
+            (goal_id,)
         )
 
     def count_tasks_by_states(self, states: tuple) -> int:
-        """Count tasks matching any of the given states."""
         placeholders = ",".join("?" * len(states))
         row = self.fetch_one(
             f"SELECT COUNT(*) as cnt FROM tasks WHERE state IN ({placeholders})",
@@ -218,7 +357,8 @@ class Database:
             raise ValueError(f"Task {task_id} not found")
         old_state = task["state"]
         now = datetime.now(timezone.utc).isoformat()
-        terminal_states = {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED"}
+        terminal_states = {"CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED",
+                           "TRAINING_COMPLETED", "TRAINING_FAILED", "TRAINING_STALLED"}
         completed = now if new_state in terminal_states else None
         with self.transaction() as conn:
             conn.execute(
@@ -255,6 +395,193 @@ class Database:
             (task_id, old_state, new_state, trigger, pid, log_path,
              1 if model_called else 0, retry_count)
         )
+
+    # ---- Goal CRUD ----
+
+    def create_goal(self, goal_id: str, objective: str, completion_criteria: str = "",
+                    stop_conditions: str = "", max_iterations: int = 10,
+                    max_failures: int = 3, model_call_budget: int = 100,
+                    review_mode: str = "auto") -> Dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO goals (id, objective, state, completion_criteria,
+                   stop_conditions, max_iterations, max_failures,
+                   model_call_budget, review_mode, created_at)
+                   VALUES (?, ?, 'GOAL_CREATED', ?, ?, ?, ?, ?, ?, ?)""",
+                (goal_id, objective, completion_criteria, stop_conditions,
+                 max_iterations, max_failures, model_call_budget, review_mode, now)
+            )
+        return self.get_goal(goal_id)
+
+    def get_goal(self, goal_id: str) -> Optional[Dict[str, Any]]:
+        return self.fetch_one("SELECT * FROM goals WHERE id = ?", (goal_id,))
+
+    def get_all_goals(self) -> List[Dict[str, Any]]:
+        return self.fetch_all("SELECT * FROM goals ORDER BY created_at DESC")
+
+    def get_active_goals(self) -> List[Dict[str, Any]]:
+        terminal = ("GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED")
+        placeholders = ",".join("?" * len(terminal))
+        return self.fetch_all(
+            f"SELECT * FROM goals WHERE state NOT IN ({placeholders}) ORDER BY created_at",
+            terminal
+        )
+
+    def update_goal_state(self, goal_id: str, new_state: str):
+        now = datetime.now(timezone.utc).isoformat()
+        terminal = ("GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED")
+        completed = now if new_state in terminal else None
+        started = now if new_state == "GOAL_EXECUTING" else None
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET state = ?, completed_at = ?, started_at = COALESCE(?, started_at) WHERE id = ?",
+                (new_state, completed, started, goal_id)
+            )
+
+    def update_goal_field(self, goal_id: str, **kwargs):
+        if not kwargs:
+            return
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [goal_id]
+        with self.transaction() as conn:
+            conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", values)
+
+    def increment_goal_iteration(self, goal_id: str):
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET iteration_count = iteration_count + 1 WHERE id = ?",
+                (goal_id,)
+            )
+
+    def increment_goal_failure(self, goal_id: str):
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE goals SET failure_count = failure_count + 1 WHERE id = ?",
+                (goal_id,)
+            )
+
+    # ---- Events ----
+
+    def create_event(self, event_id: str, event_type: str, goal_id: str = None,
+                     task_id: str = None, payload: str = None,
+                     idempotency_key: str = None,
+                     state_version: int = 1) -> Optional[Dict[str, Any]]:
+        """Create event. Returns None if idempotency key already exists."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.transaction() as conn:
+                if idempotency_key:
+                    existing = conn.execute(
+                        "SELECT id FROM events WHERE idempotency_key = ?",
+                        (idempotency_key,)
+                    ).fetchone()
+                    if existing:
+                        return None
+                conn.execute(
+                    """INSERT INTO events (event_id, goal_id, task_id, event_type,
+                       payload, state_version, idempotency_key, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (event_id, goal_id, task_id, event_type, payload,
+                     state_version, idempotency_key, now)
+                )
+            return self.get_event(event_id)
+        except sqlite3.IntegrityError:
+            return None
+
+    def get_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        return self.fetch_one("SELECT * FROM events WHERE event_id = ?", (event_id,))
+
+    def get_unacknowledged_events(self, goal_id: str = None,
+                                   event_types: List[str] = None,
+                                   after_version: int = 0,
+                                   limit: int = 10) -> List[Dict[str, Any]]:
+        """Get unacknowledged events, optionally filtered."""
+        conditions = ["acknowledged = 0", "state_version > ?"]
+        params = [after_version]
+
+        if goal_id:
+            conditions.append("goal_id = ?")
+            params.append(goal_id)
+
+        if event_types:
+            placeholders = ",".join("?" * len(event_types))
+            conditions.append(f"event_type IN ({placeholders})")
+            params.extend(event_types)
+
+        where = " AND ".join(conditions)
+        return self.fetch_all(
+            f"SELECT * FROM events WHERE {where} ORDER BY state_version ASC LIMIT ?",
+            params + [limit]
+        )
+
+    def acknowledge_event(self, event_id: str, handled_by: str = "") -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE events SET acknowledged = 1, acknowledged_at = ?, handled_by = ? "
+                "WHERE event_id = ? AND acknowledged = 0",
+                (now, handled_by, event_id)
+            )
+            return cur.rowcount > 0
+
+    def get_next_event(self, goal_id: str = None,
+                       event_types: List[str] = None) -> Optional[Dict[str, Any]]:
+        results = self.get_unacknowledged_events(
+            goal_id=goal_id, event_types=event_types, limit=1
+        )
+        return results[0] if results else None
+
+    def get_latest_version(self, goal_id: str = None) -> int:
+        if goal_id:
+            row = self.fetch_one(
+                "SELECT MAX(state_version) as mv FROM events WHERE goal_id = ?",
+                (goal_id,)
+            )
+        else:
+            row = self.fetch_one("SELECT MAX(state_version) as mv FROM events", ())
+        return row["mv"] if row and row["mv"] else 0
+
+    # ---- Model Calls ----
+
+    def create_model_call(self, goal_id: str, task_id: str, model_role: str,
+                          reason: str = "", estimated_usage: int = 0) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO model_calls (goal_id, task_id, model_role, reason,
+                   start_time, status, estimated_usage)
+                   VALUES (?, ?, ?, ?, ?, 'started', ?)""",
+                (goal_id, task_id, model_role, reason, now, estimated_usage)
+            )
+            return cur.lastrowid
+
+    def complete_model_call(self, call_id: int, status: str = "completed",
+                            result_summary: str = ""):
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE model_calls SET end_time = ?, status = ?, result_summary = ? WHERE id = ?",
+                (now, status, result_summary, call_id)
+            )
+
+    def get_model_calls(self, goal_id: str = None) -> List[Dict[str, Any]]:
+        if goal_id:
+            return self.fetch_all(
+                "SELECT * FROM model_calls WHERE goal_id = ? ORDER BY start_time",
+                (goal_id,)
+            )
+        return self.fetch_all("SELECT * FROM model_calls ORDER BY start_time DESC LIMIT 100")
+
+    def count_model_calls(self, goal_id: str = None) -> int:
+        if goal_id:
+            row = self.fetch_one(
+                "SELECT COUNT(*) as cnt FROM model_calls WHERE goal_id = ?",
+                (goal_id,)
+            )
+        else:
+            row = self.fetch_one("SELECT COUNT(*) as cnt FROM model_calls", ())
+        return row["cnt"] if row else 0
 
     # ---- Lock management ----
 
@@ -302,16 +629,11 @@ class Database:
     # ---- Janitor helpers ----
 
     def clean_task(self, task_id: str):
-        """Delete a task and its transitions."""
         with self.transaction() as conn:
             conn.execute("DELETE FROM state_transitions WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
 
     def clean_old_terminal_tasks(self, retention_seconds: float) -> int:
-        """Delete terminal tasks older than retention_seconds. Returns count."""
-        cutoff = datetime.now(timezone.utc).isoformat()
-        # Simple approach: delete by created_at date comparison
-        # For more precision, use timestamp comparison in Python
         terminal = ["CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED", "CANCELLED"]
         placeholders = ",".join("?" * len(terminal))
         with self.transaction() as conn:
