@@ -193,11 +193,12 @@ async def _recover_goals(db, goal_manager, orchestrator) -> List[Dict]:
 
     logger.info(f"Recovery: found {len(active_goals)} active goals")
 
+    # orchestrator.recover() internally iterates all active goals —
+    # calling it here in a loop would create N*N orchestrator instances.
+    # Just call it once and let it handle every active goal internally.
     for goal in active_goals:
-        goal_id = goal["id"]
-        logger.info(f"Recovery: resuming goal {goal_id} (state={goal['state']})")
-        await orchestrator.recover()
-        recovered.append({"goal_id": goal_id, "action": "resumed", "type": "goal"})
+        recovered.append({"goal_id": goal["id"], "action": "resumed", "type": "goal"})
+    await orchestrator.recover()
 
     return recovered
 

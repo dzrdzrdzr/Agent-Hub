@@ -159,22 +159,51 @@ class GoalOrchestrator:
                 if resume_step == "reviewing":
                     pass  # skip, already past training
                 elif resume_step == "training":
-                    # Recovery: check if training is already running
+                    # Recovery: check current training state and resume accordingly
                     task = self.task_manager.get_task(goal.get("current_task_id")) if self.task_manager else None
                     train_id = self.training_manager.training_task_id(task["id"]) if (task and self.training_manager) else None
                     train_task = self.task_manager.get_task(train_id) if (train_id and self.task_manager) else None
-                    if train_task and train_task.get("training_state") in ("TRAINING_RUNNING", "TRAINING_COMPLETED", "RESULT_READY"):
-                        logger.info(f"Goal {goal_id}: training {train_id} already "
-                                    f"{train_task.get('training_state')}, skipping re-create")
-                        # Wait for event that may have fired while we were down
-                        train_event = await self.event_manager.wait_for_event(
-                            goal_id=goal_id,
-                            event_types=["TRAINING_COMPLETED", "TRAINING_FAILED",
-                                         "TRAINING_STALLED", "RESULT_READY"],
-                            timeout=10,
-                        )
-                        if train_event:
-                            self.event_manager.acknowledge(train_event["event_id"], "orchestrator")
+                    if train_task:
+                        tstate = train_task.get("training_state", "")
+                        logger.info(f"Goal {goal_id}: training {train_id} state={tstate}, resuming")
+                        if tstate == "TRAINING_RUNNING":
+                            # Training still running — wait for completion
+                            train_event = await self.event_manager.wait_for_event(
+                                goal_id=goal_id, task_id=train_id,
+                                event_types=["TRAINING_COMPLETED", "TRAINING_FAILED",
+                                             "TRAINING_STALLED", "RESULT_READY"],
+                                timeout=10,
+                            )
+                            if train_event:
+                                self.event_manager.acknowledge(train_event["event_id"], "orchestrator")
+                                if train_event["event_type"] == "TRAINING_COMPLETED":
+                                    # Also wait for RESULT_READY
+                                    result_event = await self.event_manager.wait_for_event(
+                                        goal_id=goal_id, task_id=train_id,
+                                        event_types=["RESULT_READY", "TRAINING_FAILED", "TRAINING_STALLED"],
+                                        timeout=10,
+                                    )
+                                    if result_event:
+                                        self.event_manager.acknowledge(result_event["event_id"], "orchestrator")
+                        elif tstate == "TRAINING_COMPLETED":
+                            # Training completed — wait for RESULT_READY
+                            result_event = await self.event_manager.wait_for_event(
+                                goal_id=goal_id, task_id=train_id,
+                                event_types=["RESULT_READY", "TRAINING_FAILED", "TRAINING_STALLED"],
+                                timeout=10,
+                            )
+                            if result_event:
+                                self.event_manager.acknowledge(result_event["event_id"], "orchestrator")
+                        elif tstate == "RESULT_READY":
+                            # Already complete — acknowledge any lingering RESULT_READY event
+                            result_event = await self.event_manager.wait_for_event(
+                                goal_id=goal_id, task_id=train_id,
+                                event_types=["RESULT_READY"],
+                                timeout=5,
+                            )
+                            if result_event:
+                                self.event_manager.acknowledge(result_event["event_id"], "orchestrator")
+                        # For FAILED/STALLED, no additional wait needed
                     elif task and task.get("training_requested"):
                         await self._step_training(goal_id)
                     self.goal_manager.set_orchestrator_step(goal_id, "reviewing")
@@ -302,12 +331,19 @@ class GoalOrchestrator:
                     logger.error(f"Goal {goal_id}: safety blocked task {task_id}")
                     return
                 if getattr(safety_result, 'requires_approval', False):
-                    self.task_manager.transition(task_id, "WAITING_APPROVAL",
-                                                  trigger="safety_requires_approval")
-                    self.event_manager.emit_event("WAITING_APPROVAL", goal_id=goal_id,
-                                                   task_id=task_id)
-                    logger.warning(f"Goal {goal_id}: task {task_id} requires safety approval")
-                    return
+                    # Check if goal is in autonomous review mode
+                    goal = self.goal_manager.get_goal(goal_id)
+                    if goal and goal.get("review_mode", "auto") == "auto":
+                        logger.info(f"Goal {goal_id}: auto-approving safety for task {task_id} "
+                                    f"(review_mode=auto, risk={getattr(safety_result, 'risk', 'unknown')})")
+                        # Fall through to spawn — auto-approved
+                    else:
+                        self.task_manager.transition(task_id, "WAITING_APPROVAL",
+                                                      trigger="safety_requires_approval")
+                        self.event_manager.emit_event("WAITING_APPROVAL", goal_id=goal_id,
+                                                       task_id=task_id)
+                        logger.warning(f"Goal {goal_id}: task {task_id} requires safety approval")
+                        return
 
             try:
                 run_id, info = await self.cline_executor.spawn(task)
@@ -339,6 +375,18 @@ class GoalOrchestrator:
         task_id = goal.get("current_task_id") if goal else None
         if task_id:
             task = self.task_manager.get_task(task_id)
+            if task and task["state"] == "WAITING_APPROVAL":
+                # Task stuck waiting for approval in non-auto mode —
+                # treat as failure to unblock the orchestrator
+                logger.warning(f"Goal {goal_id}: task {task_id} is WAITING_APPROVAL, "
+                               f"treating as failed to unblock")
+                self.task_manager.transition(task_id, "CLINE_FAILED",
+                                              trigger="waiting_approval_timeout")
+                self.goal_manager.increment_failure(goal_id)
+                self.event_manager.emit_event("CLINE_FAILED", goal_id=goal_id,
+                                              task_id=task_id,
+                                              payload={"reason": "waiting_approval_timeout"})
+                return
             if task and task["state"] in ("CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED"):
                 event_type = task["state"]
                 run_id = task.get("run_id", "")
@@ -436,6 +484,20 @@ class GoalOrchestrator:
             return
 
         task = self.task_manager.get_task(task_id)
+
+        # If training not yet requested, try to extract training_command from
+        # Cline's structured_result or log output.
+        if task and not task.get("training_requested") and self.training_manager:
+            training_cmd = self._extract_training_cmd(task)
+            if training_cmd:
+                logger.info(f"Goal {goal_id}: extracted training_command from Cline output")
+                await self.training_manager.request_training(
+                    task, training_cmd,
+                    training_cwd=task.get("training_cwd") or "",
+                )
+                # Re-read task to get updated training_requested
+                task = self.task_manager.get_task(task_id)
+
         if not task or not task.get("training_requested"):
             return
 
@@ -479,6 +541,9 @@ class GoalOrchestrator:
             if event_type in ("TRAINING_FAILED", "TRAINING_STALLED"):
                 logger.warning(f"Goal {goal_id}: training ended with {event_type}, stopping round")
                 return
+            elif event_type == "RESULT_READY":
+                # Already ready — nothing more to wait for
+                logger.info(f"Goal {goal_id}: training result already READY")
             elif event_type == "TRAINING_COMPLETED":
                 # Wait for RESULT_READY before proceeding to review
                 result_event = await self.event_manager.wait_for_event(
@@ -496,6 +561,51 @@ class GoalOrchestrator:
                 else:
                     logger.warning(f"Goal {goal_id}: training completed but RESULT_READY timeout")
                     return
+
+
+    def _extract_training_cmd(self, task):
+        """Parse Cline task output for training_command in structured result or log."""
+        import re
+        # Check structured_result first
+        struct = task.get("structured_result", "")
+        if struct:
+            try:
+                parsed = json.loads(struct)
+                cmd = parsed.get("training_command")
+                if cmd:
+                    return cmd
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Check log_stdout for JSON block with training_command
+        log_path = task.get("log_stdout", "")
+        if log_path and os.path.exists(log_path):
+            try:
+                with open(log_path, 'r') as lf:
+                    log_text = lf.read()
+                m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', log_text, re.DOTALL)
+                if m:
+                    try:
+                        parsed = json.loads(m.group(1))
+                        cmd = parsed.get("training_command")
+                        if cmd:
+                            return cmd
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                # Try raw JSON line
+                for log_line in log_text.splitlines():
+                    log_line = log_line.strip()
+                    if log_line.startswith('{') and 'training_command' in log_line:
+                        try:
+                            parsed = json.loads(log_line)
+                            cmd = parsed.get("training_command")
+                            if cmd:
+                                return cmd
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            except Exception:
+                pass
+        return None
 
     async def _step_review(self, goal_id: str) -> bool:
         """Codex reviews results and decides next step."""

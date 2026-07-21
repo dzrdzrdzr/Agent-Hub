@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple, List
 
 from .db import Database
+import psutil
+
 from .process_watcher import (
     verify_process_identity, check_process_alive,
     terminate_process_tree, check_log_freshness
@@ -124,6 +126,22 @@ class TrainingManager:
 
     async def _spawn_locked(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         task_id = task["id"]
+
+        # Idempotency: if already running or completed, don't re-spawn
+        existing = self.db.get_task(task_id)
+        if existing:
+            existing_state = existing.get("training_state", "")
+            existing_pid = existing.get("training_pid")
+            if existing_state == "TRAINING_RUNNING":
+                if existing_pid and check_process_alive(existing_pid):
+                    run_id = uuid.uuid4().hex[:8]
+                    logger.info(f"Training {task_id}: already running (PID={existing_pid}), not re-spawning")
+                    return run_id, {"pid": existing_pid, "run_id": run_id, "already_running": True}
+            if existing_state in ("TRAINING_COMPLETED", "RESULT_READY"):
+                run_id = uuid.uuid4().hex[:8]
+                logger.info(f"Training {task_id}: already {existing_state}, not re-spawning")
+                return run_id, {"pid": existing_pid, "run_id": run_id, "already_completed": True}
+
         cmd = task.get("training_command", "")
         cwd = task.get("training_cwd") or task.get("cline_cwd") or os.getcwd()
         env_json = task.get("training_env", "")
@@ -306,12 +324,18 @@ class TrainingManager:
                 logger.info(f"Training {task_id}: already TRAINING_STALLED, not overwriting with exit_code={exit_code}")
                 return
 
-            # Classify result
+            # Classify result — sync BOTH training_state AND task state
             if exit_code == 0:
                 self.db.update_task_field(
                     task_id, training_state="TRAINING_COMPLETED",
                     training_exit_code=0
                 )
+                if self.task_manager:
+                    try:
+                        self.task_manager.transition(task_id, "TRAINING_COMPLETED",
+                                                     trigger="training_exit_zero")
+                    except ValueError:
+                        pass
                 logger.info(f"Training {task_id}: completed (exit=0)")
                 # Emit event for orchestrator
                 if self.event_manager:
@@ -328,6 +352,12 @@ class TrainingManager:
                     task_id, training_state="TRAINING_FAILED",
                     training_exit_code=exit_code
                 )
+                if self.task_manager:
+                    try:
+                        self.task_manager.transition(task_id, "TRAINING_FAILED",
+                                                     trigger="training_exit_nonzero")
+                    except ValueError:
+                        pass
                 logger.warning(f"Training {task_id}: failed (exit={exit_code})")
                 # Emit event for orchestrator
                 if self.event_manager:
@@ -369,6 +399,12 @@ class TrainingManager:
                         self.db.update_task_field(
                             task_id, training_state="TRAINING_STALLED"
                         )
+                        if self.task_manager:
+                            try:
+                                self.task_manager.transition(task_id, "TRAINING_STALLED",
+                                                             trigger="training_stall_detected")
+                            except ValueError:
+                                pass
                         # Emit stall event for orchestrator
                         if self.event_manager:
                             task = self.db.get_task(task_id)
@@ -388,17 +424,29 @@ class TrainingManager:
     async def _trigger_result_ready(self, task_id: str):
         """After training completes, generate result package."""
         self.db.update_task_field(task_id, training_state="RESULT_ANALYZING")
+        if self.task_manager:
+            try:
+                self.task_manager.transition(task_id, "RESULT_ANALYZING",
+                                             trigger="training_analyzing")
+            except ValueError:
+                pass
 
         # Extract metrics
         task = self.db.get_task(task_id)
         metrics = await self._extract_metrics(task)
 
-        # Write result package
+        # Write result package — sync BOTH training_state AND task state
         self.db.update_task_field(
             task_id,
             training_state="RESULT_READY",
             structured_result=json.dumps(metrics, ensure_ascii=False),
         )
+        if self.task_manager:
+            try:
+                self.task_manager.transition(task_id, "RESULT_READY",
+                                             trigger="training_result_ready")
+            except ValueError:
+                pass
         logger.info(f"Training {task_id}: RESULT_READY")
 
         # Emit RESULT_READY for orchestrator
@@ -525,12 +573,24 @@ class TrainingManager:
 
         async def _recovery_monitor():
             try:
+                # Poll at shorter interval for faster recovery
                 while check_process_alive(pid):
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(5)
+                # Process exited — try to get exit code
                 exit_code = None
                 try:
                     import psutil
                     exit_code = psutil.Process(pid).wait()
+                except psutil.NoSuchProcess:
+                    # Process already reaped — check log for success indicators
+                    if stdout_path and os.path.exists(stdout_path):
+                        try:
+                            with open(stdout_path, 'r') as lf:
+                                log_text = lf.read()
+                            if 'completed' in log_text.lower() or 'done' in log_text.lower():
+                                exit_code = 0
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -539,6 +599,12 @@ class TrainingManager:
                         task_id, training_state="TRAINING_COMPLETED",
                         training_exit_code=0
                     )
+                    if self.task_manager:
+                        try:
+                            self.task_manager.transition(task_id, "TRAINING_COMPLETED",
+                                                         trigger="recovery_training_completed")
+                        except ValueError:
+                            pass
                     if self.event_manager:
                         task = self.db.get_task(task_id)
                         goal_id = task.get("goal_id") if task else None
@@ -553,6 +619,12 @@ class TrainingManager:
                         training_exit_code=exit_code,
                         error_summary=f"recovery_exit_code:{exit_code}"
                     )
+                    if self.task_manager:
+                        try:
+                            self.task_manager.transition(task_id, "TRAINING_FAILED",
+                                                         trigger="recovery_training_failed")
+                        except ValueError:
+                            pass
                     if self.event_manager:
                         task = self.db.get_task(task_id)
                         goal_id = task.get("goal_id") if task else None

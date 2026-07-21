@@ -251,9 +251,6 @@ async def main():
     for r in recovered:
         logger.info(f"  Recovery: {r}")
 
-    # Recover orchestrator for active goals
-    await orchestrator.recover()
-
     # Start IPC server
     server = IPCServer(config, task_manager, cline_executor, budget_tracker, safety_guard,
                        goal_manager=goal_manager, event_manager=event_manager,
