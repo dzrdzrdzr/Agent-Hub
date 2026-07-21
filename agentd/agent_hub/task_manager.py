@@ -81,8 +81,9 @@ class TaskManager:
                     priority: int = 0, max_retries: int = 1,
                     cline_exe_path: str = "",
                     goal_id: str = None, parent_task_id: str = None,
-                    task_sequence: int = 0) -> Dict[str, Any]:
-        task_id = f"task-{uuid.uuid4().hex[:12]}"
+                    task_sequence: int = 0,
+                    task_id: str = None) -> Dict[str, Any]:
+        task_id = task_id or f"task-{uuid.uuid4().hex[:12]}"
         task = self.db.create_task(
             task_id=task_id, task_type=task_type, prompt=prompt,
             priority=priority, max_retries=max_retries,

@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at TEXT,
     completed_at TEXT,
     error_summary TEXT,
-    review_required INTEGER NOT NULL DEFAULT 0
+    review_required INTEGER NOT NULL DEFAULT 0,
+    safety_violations TEXT
 );
 
 CREATE TABLE IF NOT EXISTS goals (
@@ -77,7 +78,9 @@ CREATE TABLE IF NOT EXISTS goals (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     started_at TEXT,
     completed_at TEXT,
-    error_summary TEXT
+    error_summary TEXT,
+    skip_next_plan INTEGER NOT NULL DEFAULT 0,
+    orchestrator_step TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -258,12 +261,17 @@ class Database:
                 pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_training ON tasks(training_state)")
+        if from_version < 4:
             try:
                 conn.execute("ALTER TABLE goals ADD COLUMN skip_next_plan INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             try:
                 conn.execute("ALTER TABLE goals ADD COLUMN orchestrator_step TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN safety_violations TEXT")
             except sqlite3.OperationalError:
                 pass
 

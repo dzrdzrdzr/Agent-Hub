@@ -217,6 +217,12 @@ class TrainingManager:
             except asyncio.CancelledError:
                 pass
 
+            # Check if stall monitor already marked the task
+            task_current = self.db.get_task(task_id)
+            if task_current and task_current.get("training_state") == "TRAINING_STALLED":
+                logger.info(f"Training {task_id}: already TRAINING_STALLED, not overwriting with exit_code={exit_code}")
+                return
+
             # Classify result
             if exit_code == 0:
                 self.db.update_task_field(
@@ -402,14 +408,14 @@ class TrainingManager:
         """Re-attach monitor for a surviving training process after restart."""
         task = self.db.get_task(task_id)
         if not task:
-            return
+            return False
 
         stdout_path = task.get("training_log", "")
         stderr_path = stdout_path.replace(".stdout.", ".stderr.") if stdout_path else ""
 
         if not stdout_path:
             logger.warning(f"Cannot attach training monitor for {task_id}: no log path")
-            return
+            return False
 
         # Verify process ownership before attaching
         is_ours, reason = verify_process_identity({
@@ -432,7 +438,7 @@ class TrainingManager:
                     "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
                     payload={"reason": f"pid_mismatch: {reason}"}
                 )
-            return
+            return False
 
         async def _recovery_monitor():
             try:
@@ -477,6 +483,7 @@ class TrainingManager:
         self._monitors[task_id] = asyncio.create_task(_recovery_monitor())
         self._processes[task_id] = {"pid": pid}
         logger.info(f"Re-attached training monitor for {task_id} PID {pid}")
+        return True
 
     def get_active_training_tasks(self) -> List[Dict[str, Any]]:
         """Get tasks in training states."""

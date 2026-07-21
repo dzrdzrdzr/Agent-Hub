@@ -124,7 +124,28 @@ class GoalOrchestrator:
                     break
 
                 # Step 2: Execute (Cline runs the task)
-                if resume_step not in ("waiting_cline", "training", "reviewing"):
+                if resume_step in ("waiting_cline", "training", "reviewing"):
+                    pass  # skip, already past execution
+                elif resume_step == "executing":
+                    # Recovery: task was already spawned — verify and skip to wait
+                    task = self.task_manager.get_task(goal.get("current_task_id")) if self.task_manager else None
+                    if task and task["state"] in ("CLINE_RUNNING",):
+                        pid = task.get("cline_pid")
+                        if pid and self.cline_executor:
+                            from agent_hub.process_watcher import check_process_alive
+                            if check_process_alive(pid):
+                                logger.info(f"Goal {goal_id}: resuming exec, task {task['id']} "
+                                            f"already RUNNING PID={pid}, skipping spawn")
+                                self.goal_manager.set_orchestrator_step(goal_id, "waiting_cline")
+                            else:
+                                logger.warning(f"Goal {goal_id}: task {task['id']} PID {pid} dead on resume, "
+                                               f"will re-spawn")
+                                await self._step_execute(goal_id)
+                        else:
+                            await self._step_execute(goal_id)
+                    else:
+                        await self._step_execute(goal_id)
+                else:
                     await self._step_execute(goal_id)
 
                 # Step 3: Wait for Cline completion
@@ -132,7 +153,29 @@ class GoalOrchestrator:
                     await self._step_wait_cline(goal_id)
 
                 # Step 4: Handle training if requested
-                if resume_step != "reviewing":
+                if resume_step == "reviewing":
+                    pass  # skip, already past training
+                elif resume_step == "training":
+                    # Recovery: check if training is already running
+                    task = self.task_manager.get_task(goal.get("current_task_id")) if self.task_manager else None
+                    train_id = self.training_manager.training_task_id(task["id"]) if (task and self.training_manager) else None
+                    train_task = self.task_manager.get_task(train_id) if (train_id and self.task_manager) else None
+                    if train_task and train_task.get("training_state") in ("TRAINING_RUNNING", "TRAINING_COMPLETED", "RESULT_READY"):
+                        logger.info(f"Goal {goal_id}: training {train_id} already "
+                                    f"{train_task.get('training_state')}, skipping re-create")
+                        # Wait for event that may have fired while we were down
+                        train_event = await self.event_manager.wait_for_event(
+                            goal_id=goal_id,
+                            event_types=["TRAINING_COMPLETED", "TRAINING_FAILED",
+                                         "TRAINING_STALLED", "RESULT_READY"],
+                            timeout=10,
+                        )
+                        if train_event:
+                            self.event_manager.acknowledge(train_event["event_id"], "orchestrator")
+                    elif task and task.get("training_requested"):
+                        await self._step_training(goal_id)
+                    self.goal_manager.set_orchestrator_step(goal_id, "reviewing")
+                else:
                     await self._step_training(goal_id)
 
                 # Step 5: Review (Codex reviews results)
@@ -305,8 +348,8 @@ class GoalOrchestrator:
         for loop_i in range(max_loops):
             event = await self.event_manager.wait_for_event(
                 goal_id=goal_id,
-                event_types=["CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED",
-                             "TRAINING_COMPLETED", "TRAINING_FAILED"],
+                task_id=task_id,
+                event_types=["CLINE_SUCCEEDED", "CLINE_FAILED", "CLINE_STALLED"],
                 timeout=wait_timeout,
             )
 

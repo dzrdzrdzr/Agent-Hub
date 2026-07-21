@@ -282,27 +282,30 @@ class ClineExecutor:
 
         # Exit watcher using psutil polling (since we can't reconnect subprocess)
         async def _poll_exit():
+            captured_exit_code = -1  # default: unknown failure
             try:
                 while True:
                     if not psutil.pid_exists(pid):
+                        captured_exit_code = -1
                         break
                     proc = psutil.Process(pid)
                     try:
-                        exit_code = proc.wait(timeout=5)
+                        captured_exit_code = proc.wait(timeout=5)
                         break
                     except psutil.TimeoutExpired:
                         continue
                     except psutil.NoSuchProcess:
+                        captured_exit_code = -1
                         break
             except psutil.NoSuchProcess:
-                pass
+                captured_exit_code = -1
             except Exception as e:
                 logger.error(f"Recovery exit poll error {task_id}: {e}")
 
-            # Process exited — classify result
+            # Process exited — classify with actual exit code
             lock = self._get_lock(task_id)
             async with lock:
-                await self._classify_exit(task_id, -1 if not psutil.pid_exists(pid) else 0)
+                await self._classify_exit(task_id, captured_exit_code)
 
         exit_task = asyncio.create_task(_poll_exit())
         self._running[task_id] = exit_task

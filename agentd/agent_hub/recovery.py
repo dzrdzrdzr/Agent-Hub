@@ -170,8 +170,10 @@ async def _recover_training(db, task_manager, training_manager) -> List[Dict]:
 
         if pid and check_process_alive(pid):
             logger.info(f"Recovery: training {task_id} PID {pid} alive, reattaching")
-            training_manager.attach_monitor(task_id, pid)
-            db.update_task_field(task_id, training_state="TRAINING_RUNNING")
+            attached = training_manager.attach_monitor(task_id, pid)
+            if attached:
+                db.update_task_field(task_id, training_state="TRAINING_RUNNING")
+            # If attach failed, state is already set to TRAINING_FAILED inside attach_monitor
             recovered.append({"task_id": task_id, "action": "reattached", "type": "training"})
         elif pid:
             logger.info(f"Recovery: training {task_id} PID {pid} dead")

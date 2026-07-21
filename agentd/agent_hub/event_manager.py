@@ -64,7 +64,7 @@ class EventManager:
                      f"goal={goal_id} task={task_id}")
 
         # Wake waiters
-        self._notify_waiters(event_type, goal_id)
+        self._notify_waiters(event_type, goal_id, task_id)
 
         return event
 
@@ -108,6 +108,7 @@ class EventManager:
     # ---- Blocking wait_for_event ----
 
     async def wait_for_event(self, goal_id: str = None,
+                             task_id: str = None,
                              event_types: List[str] = None,
                              after_version: int = 0,
                              timeout: float = None) -> Optional[Dict[str, Any]]:
@@ -115,6 +116,7 @@ class EventManager:
 
         Returns the event dict, or None on timeout.
         Only returns KEY events (not RUNNING/HEARTBEAT).
+        Optional task_id filter for per-task event isolation.
         """
         # First check for any existing unacknowledged events
         types_to_wait = event_types or list(KEY_EVENT_TYPES)
@@ -125,7 +127,9 @@ class EventManager:
             limit=1,
         )
         if existing:
-            return existing[0]
+            e = existing[0]
+            if task_id is None or e.get("task_id") == task_id:
+                return e
 
         # No existing events — create a waiter
         waiter_id = f"waiter-{uuid.uuid4().hex[:8]}"
@@ -134,6 +138,7 @@ class EventManager:
         self._waiters[waiter_id] = {
             "event": wake_event,
             "goal_id": goal_id,
+            "task_id": task_id,
             "event_types": set(types_to_wait),
             "result": None,
         }
@@ -153,10 +158,13 @@ class EventManager:
             self._waiters.pop(waiter_id, None)
             raise
 
-    def _notify_waiters(self, event_type: str, goal_id: str = None):
+    def _notify_waiters(self, event_type: str, goal_id: str = None,
+                         task_id: str = None):
         """Notify waiters matching this event."""
         for waiter_id, waiter in list(self._waiters.items()):
             if waiter["goal_id"] and waiter["goal_id"] != goal_id:
+                continue
+            if waiter.get("task_id") and task_id and waiter["task_id"] != task_id:
                 continue
             if event_type not in waiter["event_types"]:
                 continue
