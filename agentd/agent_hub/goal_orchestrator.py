@@ -43,7 +43,7 @@ class GoalOrchestrator:
         self.task_manager = task_manager
         self.cline_executor = cline_executor
         self.training_manager = training_manager
-        self.codex_executor = codex_executor or MockCodexExecutor()
+        self.codex_executor = codex_executor
         self.max_iterations = max_iterations
         self.max_failures = max_failures
         self.event_wait_timeout = event_wait_timeout
@@ -325,8 +325,8 @@ class GoalOrchestrator:
                 task, training_cmd,
                 training_cwd=task.get("training_cwd") or "",
             )
-            await self.training_manager.spawn(task)
-            logger.info(f"Goal {goal_id}: training spawned for task {task_id}")
+            await self.training_manager.spawn(train_task)
+            logger.info(f"Goal {goal_id}: training spawned for task {train_task['id']}")
 
             # Wait for training completion
             train_event = await self.event_manager.wait_for_event(
@@ -343,6 +343,12 @@ class GoalOrchestrator:
         goal = self.goal_manager.get_goal(goal_id)
         if goal["state"] in ("GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED"):
             return False
+
+        if not self.codex_executor:
+            self.goal_manager.fail_goal(goal_id,
+                reason="Codex CLI not available for review. Install Codex or enable cline.mock.")
+            return False
+
         self.goal_manager.transition(goal_id, "GOAL_REVIEWING", trigger="step_review")
 
         task_id = goal.get("current_task_id")

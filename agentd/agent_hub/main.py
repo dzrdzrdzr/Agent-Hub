@@ -179,6 +179,7 @@ async def main():
     event_manager = EventManager(db)
     training_manager = TrainingManager(
         db, task_manager=task_manager,
+        event_manager=event_manager,
         stall_threshold=config.cline.stall_threshold_seconds,
         logs_dir=config.logs.dir,
     )
@@ -192,7 +193,8 @@ async def main():
             budget_tracker=budget_tracker,
         )
         logger.info(f"  Codex: {codex_path}")
-    else:
+    elif config.cline.mock:
+        # Mock only when explicitly enabled via config (never silent fallback)
         codex_executor = MockCodexExecutor(plan_sequence=[
             {"verdict": "plan_ready",
              "next_task": {"prompt": "mock task: implement feature",
@@ -205,7 +207,11 @@ async def main():
              "goal_complete": True,
              "reasoning": "mock: goal achieved after 2 iterations"},
         ])
-        logger.info("  Codex: mock (no real CLI found)")
+        logger.warning("  Codex: mock (explicitly enabled, no real CLI found)")
+    else:
+        codex_executor = None
+        logger.error("  Codex: NOT FOUND. Goals requiring planning/review will FAIL. "
+                     "Install Codex CLI or set cline.mock=true in config.yaml.")
 
     # Orchestrator
     orchestrator = GoalOrchestrator(

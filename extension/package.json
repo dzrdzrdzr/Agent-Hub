@@ -2,7 +2,7 @@
   "name": "agent-hub",
   "displayName": "Agent Hub",
   "description": "Planner \u2194 Executor bridge: a sidebar that lets AI coding agents (Codex, KimiCode) plan and review while delegating heavy code edits to Cline CLI. Submit tasks, watch live output, retry on failure \u2014 all from one panel.",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "publisher": "agenthub",
   "license": "MIT",
   "engines": {

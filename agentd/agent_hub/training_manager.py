@@ -38,10 +38,12 @@ class TrainingManager:
     """Manages independent training processes tracked via tasks table."""
 
     def __init__(self, db: Database, task_manager=None,
+                 event_manager=None,
                  stall_threshold: int = 300,
                  logs_dir: str = ".agent-hub/logs/"):
         self.db = db
         self.task_manager = task_manager
+        self.event_manager = event_manager
         self.stall_threshold = stall_threshold
         self.logs_dir = logs_dir
         self._monitors = {}    # task_id -> asyncio.Task
@@ -84,6 +86,13 @@ class TrainingManager:
         self.db.update_task_field(
             task_id,
             training_requested=1,
+            training_command=training_cmd,
+            training_cwd=cwd,
+            training_env=env_json,
+        )
+        # Also store training_command on the new training task
+        self.db.update_task_field(
+            training_id,
             training_command=training_cmd,
             training_cwd=cwd,
             training_env=env_json,
@@ -214,6 +223,14 @@ class TrainingManager:
                     training_exit_code=0
                 )
                 logger.info(f"Training {task_id}: completed (exit=0)")
+                # Emit event for orchestrator
+                if self.event_manager:
+                    task = self.db.get_task(task_id)
+                    goal_id = task.get("goal_id") if task else None
+                    self.event_manager.emit_event(
+                        "TRAINING_COMPLETED", goal_id=goal_id, task_id=task_id,
+                        payload={"exit_code": 0}
+                    )
                 # Auto-trigger result analysis
                 await self._trigger_result_ready(task_id)
             else:
@@ -222,6 +239,14 @@ class TrainingManager:
                     training_exit_code=exit_code
                 )
                 logger.warning(f"Training {task_id}: failed (exit={exit_code})")
+                # Emit event for orchestrator
+                if self.event_manager:
+                    task = self.db.get_task(task_id)
+                    goal_id = task.get("goal_id") if task else None
+                    self.event_manager.emit_event(
+                        "TRAINING_FAILED", goal_id=goal_id, task_id=task_id,
+                        payload={"exit_code": exit_code}
+                    )
 
         except Exception as e:
             logger.error(f"Training monitor error for {task_id}: {e}")
@@ -254,6 +279,13 @@ class TrainingManager:
                         self.db.update_task_field(
                             task_id, training_state="TRAINING_STALLED"
                         )
+                        # Emit stall event for orchestrator
+                        if self.event_manager:
+                            task = self.db.get_task(task_id)
+                            goal_id = task.get("goal_id") if task else None
+                            self.event_manager.emit_event(
+                                "TRAINING_STALLED", goal_id=goal_id, task_id=task_id
+                            )
                         # Kill stalled process
                         if task_id in self._processes:
                             pid = self._processes[task_id].get("pid")
@@ -278,6 +310,14 @@ class TrainingManager:
             structured_result=json.dumps(metrics, ensure_ascii=False),
         )
         logger.info(f"Training {task_id}: RESULT_READY")
+
+        # Emit RESULT_READY for orchestrator
+        if self.event_manager:
+            goal_id = task.get("goal_id") if task else None
+            self.event_manager.emit_event(
+                "RESULT_READY", goal_id=goal_id, task_id=task_id,
+                payload=metrics
+            )
 
     async def _extract_metrics(self, task: Dict[str, Any]) -> dict:
         """Extract training metrics from log files."""

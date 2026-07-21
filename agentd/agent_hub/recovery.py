@@ -4,6 +4,7 @@ Handles: goals, tasks (Cline), events, training processes.
 """
 
 import os
+import json
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -190,7 +191,6 @@ def _recover_events(db, event_manager) -> List[Dict]:
     return recovered
 
 
-import json as _json_rec
 
 def _build_log_path(task: Dict[str, Any], stream: str) -> str:
     """Build default log path from task metadata."""

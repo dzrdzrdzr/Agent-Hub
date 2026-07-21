@@ -5,12 +5,12 @@
 Codex_Cline/           (workspace root; runs on Linux over SSH)
   agentd/              Python daemon (agent-hub-daemon, package: agent_hub)
   extension/           VS Code extension "Agent Hub" (TypeScript, id: agenthub.agent-hub)
-  docs/                Documentation (historical, GAUSS-era)
+  docs/                Documentation (historical, from early development)
   scripts/             Install/deploy scripts + agent-hub.py CLI client
   config.yaml          Daemon configuration
   DESIGN.md            System design document (historical)
   .agent-hub/          Runtime data (gitignored)
-  .agent-control/      Legacy runtime data from the GAUSS era (gitignored, safe to delete)
+  .agent-control/      Legacy runtime data from early development (gitignored, safe to delete)
 ```
 
 ## What Agent Hub Does
@@ -64,7 +64,7 @@ python3 scripts/agent-hub.py status --json        # machine-readable output
 If the daemon is not running, start it (from the workspace root):
 ```bash
 PYTHONPATH="$PWD/agentd" AGENT_HUB_CONFIG="$PWD/config.yaml" \
-  nohup /data7/hanzaidao/miniconda3/envs/GAUSS-SSC/bin/python -B -u -m agent_hub.main \
+  nohup python3 -B -u -m agent_hub.main \
   >> .agent-hub/logs/agentd.spawn.log 2>&1 &
 ```
 (Any python with `pyyaml` + `psutil` works; the one above also has the `cline` CLI.)
@@ -120,12 +120,12 @@ PYTHONPATH=agentd AGENT_HUB_CONFIG=config.yaml python -B -u -m agent_hub.main
 cd extension/ && npm install && npm run compile && npm run package
 
 # Tests (pytest + pytest-asyncio required; add cline to PATH)
-cd agentd/ && PATH="/data7/hanzaidao/miniconda3/envs/GAUSS-SSC/bin:$PATH" python -m pytest tests/ -v -p no:dash
-# Expected: 9 passed
+cd agentd/ && python -m pytest tests/ -v -p no:dash
+# Ensure cline is on PATH before running
 ```
 
 ## Environment Notes (SSH host)
-- Use the conda env Python designated for this project (currently GAUSS-SSC); it has `cline` CLI alongside `node`.
+- Use a Python environment that has `cline` and `node` on PATH (auto-discovery handles both).
 - The extension picks the interpreter via `agentHub.pythonPath` (.vscode/settings.json) or auto-detection; never hardcode absolute paths in code.
 - Daemon listens on 127.0.0.1:19876 (TCP, JSON-Lines). Singleton per workspace: probe the port before spawning.
 

@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-CODEX_BINARIES = ["codex", "codex-cli", "node"]
+CODEX_BINARIES = ["codex", "codex-cli"]
 
 
 def resolve_codex_path() -> Optional[str]:
@@ -132,11 +132,7 @@ class CodexExecutor:
     async def _run_once(self, prompt: str, cwd: str, input_file: str = None,
                         env: dict = None) -> CodexResult:
         """Single Codex execution attempt."""
-        cmd = [self.codex_path, "-p", prompt]
-
-        if input_file and os.path.exists(input_file):
-            # Pass input file as context
-            cmd.extend(["--input", input_file])
+        cmd = [self.codex_path, "exec", prompt]
 
         logger.info(f"Codex: {' '.join(cmd[:3])}... (cwd={cwd})")
 
@@ -161,6 +157,12 @@ class CodexExecutor:
 
             return CodexResult(output, process.returncode)
         except asyncio.TimeoutError:
+            # Kill subprocess on timeout — don't leave orphaned processes
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             raise
 
     async def plan(self, goal: Dict[str, Any], cwd: str = None,

@@ -251,12 +251,43 @@ class TaskTreeProvider implements vscode.TreeDataProvider<TaskItem> {
         try {
             const s = await client.request('get_status', { active_only: true, limit: 100 }, 5000);
             activeCount = s.active_count ?? s.tasks?.length ?? 0;
+            const budget = s.budget || {};
+
+            // ── System overview section ──
+            const sysItems: TaskItem[] = [];
+
+            // Daemon status
+            const daemonLabel = hubState === 'connected' ? 'Daemon connected' : 'Daemon reconnecting';
+            sysItems.push(new TaskItem(daemonLabel, `v0.3.0 | workspace: ${(workspaceRoot() || '').split('/').pop() || '?'}`, 'daemon'));
+
+            // Budget
+            const clineDaily = budget.cline?.daily ?? '?';
+            const codexDaily = budget.codex?.daily ?? '?';
+            const budgetDate = budget.cline?.date ?? '';
+            sysItems.push(new TaskItem(
+                `Budget today`,
+                `cline: ${clineDaily} calls | codex: ${codexDaily} calls${budgetDate ? ' | ' + budgetDate : ''}`,
+                'budget',
+            ));
+
+            // Active counts
+            let activeGoalCount = 0;
+            try {
+                const gr = await client.request('list_goals', { include_terminal: false }, 3000);
+                activeGoalCount = (gr?.goals || []).length;
+            } catch { /* ignore */ }
+            sysItems.push(new TaskItem(
+                `Active: ${activeCount} tasks, ${activeGoalCount} goals`,
+                lastError ? `last error: ${lastError}` : 'system healthy',
+                lastError ? 'warning' : 'healthy',
+            ));
+
             const tasks: any[] = s.tasks || [];
-            if (tasks.length === 0) return [
-                new TaskItem('No tasks yet', 'Ctrl+Shift+P → "Agent Hub: Delegate Task to Cline"', 'empty'),
-                new TaskItem('You plan, Cline executes', 'Write a detailed prompt with file paths and expected changes', 'empty'),
-            ];
-            return tasks.map((t: any) => {
+            if (tasks.length === 0) {
+                sysItems.push(new TaskItem('No tasks yet', 'Ctrl+Shift+P → "Agent Hub: Delegate Task to Cline"', 'empty'));
+                return sysItems;
+            }
+            const taskItems = tasks.map((t: any) => {
                 const id = t.id || '';
                 const state = t.state || 'UNKNOWN';
                 const prompt = (t.prompt || '').slice(0, 60);
@@ -301,6 +332,7 @@ class TaskTreeProvider implements vscode.TreeDataProvider<TaskItem> {
                 item.retryInfo = retry;
                 return item;
             });
+            return [...sysItems, ...taskItems];
         } catch {
             return [
                 new TaskItem('Connection lost', 'Daemon may have stopped. Run "Agent Hub: Start Daemon"', 'error'),
@@ -327,6 +359,11 @@ class TaskItem extends vscode.TreeItem {
         this.contextValue = taskId ? 'task' : 'status';
         // Icon mapping
         switch (state) {
+            // System status items
+            case 'daemon': this.iconPath = new vscode.ThemeIcon('vm-active'); break;
+            case 'budget': this.iconPath = new vscode.ThemeIcon('graph'); break;
+            case 'healthy': this.iconPath = new vscode.ThemeIcon('heart'); break;
+            // Task states
             case 'CLINE_RUNNING': this.iconPath = new vscode.ThemeIcon('sync~spin'); break;
             case 'CLINE_SUCCEEDED': this.iconPath = new vscode.ThemeIcon('pass'); break;
             case 'CLINE_FAILED': this.iconPath = new vscode.ThemeIcon('error'); break;
@@ -537,6 +574,8 @@ class GoalItem extends vscode.TreeItem {
         this.contextValue = 'goal';
         if (state === 'GOAL_COMPLETED') { this.iconPath = new vscode.ThemeIcon('check'); }
         else if (state === 'GOAL_FAILED' || state === 'GOAL_CANCELLED') { this.iconPath = new vscode.ThemeIcon('error'); }
+        else if (state === 'empty') { this.iconPath = new vscode.ThemeIcon('info'); }
+        else if (state === 'disconnected') { this.iconPath = new vscode.ThemeIcon('debug-disconnect'); }
         else if (state.includes('EXECUTING') || state.includes('RUNNING')) {
             this.iconPath = new vscode.ThemeIcon('sync~spin');
         }
@@ -552,10 +591,15 @@ class GoalTreeProvider implements vscode.TreeDataProvider<GoalItem> {
 
     async getChildren(element?: GoalItem): Promise<GoalItem[]> {
         if (element) { return []; }
-        if (!client.connected) { return []; }
+        if (!client.connected) { return [
+            new GoalItem('', 'Daemon not connected', 'disconnected', 0, 0, 0, 0, 0, 0, vscode.TreeItemCollapsibleState.None),
+        ]; }
         try {
-            const r = await client.request('list_goals', { include_terminal: false }, 5000);
+            const r = await client.request('list_goals', { include_terminal: true }, 5000);
             const goals = r?.goals || [];
+            if (goals.length === 0) { return [
+                new GoalItem('', 'No active goals', 'empty', 0, 0, 0, 0, 0, 0, vscode.TreeItemCollapsibleState.None),
+            ]; }
             return goals.map((g: any) => new GoalItem(
                 g.id, g.objective?.slice(0, 60) || g.id,
                 g.state, g.iteration_count || 0, g.failure_count || 0,
