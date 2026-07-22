@@ -13,6 +13,7 @@ import tempfile
 import asyncio
 import subprocess
 import signal
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -73,6 +74,7 @@ async def tcp_request(host, port, method, params=None):
     return response
 
 
+@pytest.mark.asyncio
 async def test_acceptance_full_pipeline():
     """Start daemon, submit goal, verify full autonomous closed-loop."""
     with tempfile.TemporaryDirectory() as tmp:

@@ -206,9 +206,13 @@ class IPCServer:
                             {"task_id": task["id"], "state": "CLINE_FAILED"})
             return {"task_id": task["id"], "state": "CLINE_FAILED", "error": str(e)}
 
-        self.task_manager.transition(task["id"], "CLINE_RUNNING", trigger="spawned")
-        await self.push("state_changed", {"task_id": task["id"], "state": task["state"]})
-        return {"task_id": task["id"], "state": task["state"]}
+        # Only transition to CLINE_RUNNING if spawn didn't already advance state
+        # (mock executor may have already completed the task synchronously)
+        current = self.task_manager.get_task(task["id"])
+        if current and current["state"] == "CLINE_STARTING":
+            self.task_manager.transition(task["id"], "CLINE_RUNNING", trigger="spawned")
+        await self.push("state_changed", {"task_id": task["id"], "state": current["state"] if current else task["state"]})
+        return {"task_id": task["id"], "state": current["state"] if current else task["state"]}
 
     async def _h_get_status(self, params):
         limit = params.get("limit", 200)

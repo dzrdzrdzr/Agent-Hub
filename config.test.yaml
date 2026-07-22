@@ -1,0 +1,28 @@
+agentd:
+  cline:
+    env:
+      HTTPS_PROXY: http://127.0.0.1:17898
+      HTTP_PROXY: http://127.0.0.1:17898
+    executable: auto
+    kill_on_shutdown: false
+    max_retries: 1
+    max_task_history: 1000
+    mock: true
+    mock_delay_seconds: 0.1
+    mock_exit_code: 0
+    retention_days: 30
+    stall_threshold_seconds: 30
+    timeout_seconds: 600
+  database:
+    path: .agent-hub/state.sqlite
+  ipc:
+    tcp_host: 127.0.0.1
+    tcp_port: 19876
+    transport: tcp
+  logs:
+    dir: .agent-hub/logs/
+  safety:
+    allow_network: false
+    forbidden_commands: []
+    max_execution_time_seconds: 3600
+    protected_paths: []

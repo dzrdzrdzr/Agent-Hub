@@ -1,6 +1,6 @@
 """Acceptance test with training: plan → execute → train → RESULT_READY → review → complete."""
 
-import os, sys, json, time, tempfile, asyncio, subprocess
+import os, sys, json, time, tempfile, asyncio, subprocess, pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -47,6 +47,7 @@ agentd:
     with open(path, "w") as f:
         f.write(config)
 
+@pytest.mark.asyncio
 async def test():
     with tempfile.TemporaryDirectory() as tmp:
         workspace = tmp
