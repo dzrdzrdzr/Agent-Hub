@@ -183,17 +183,29 @@ def resolve_cline_path(explicit_path: str = "auto") -> str:
     if which:
         return which
 
+    # The daemon is commonly launched from a Conda/venv interpreter while the
+    # extension host has a minimal PATH. Prefer a sibling Cline installation in
+    # that same environment before falling back to global npm locations.
+    env_bin = os.path.dirname(os.path.realpath(sys.executable))
+    env_candidates = [
+        os.path.join(env_bin, "cline"),
+        os.path.join(env_bin, "cline.cmd"),
+    ]
+    for candidate in env_candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
     # Platform-specific npm global bin
     if sys.platform == "win32":
         npm_bin = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "npm")
-        candidates = [
+        candidates = env_candidates + [
             os.path.join(npm_bin, "cline.cmd"),
             os.path.join(npm_bin, "cline.ps1"),
             os.path.join(npm_bin, "cline"),
         ]
     else:
         npm_bin = os.path.join(os.path.expanduser("~"), ".npm-global", "bin")
-        candidates = [
+        candidates = env_candidates + [
             os.path.join(npm_bin, "cline"),
             "/usr/local/bin/cline",
         ]

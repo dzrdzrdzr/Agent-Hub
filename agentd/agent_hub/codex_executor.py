@@ -10,6 +10,8 @@ import uuid
 import shutil
 import asyncio
 import logging
+import signal
+from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,22 @@ def resolve_codex_path() -> Optional[str]:
         candidate = os.path.join(npm_bin, name)
         if os.path.isfile(candidate):
             return candidate
+
+    # Remote VS Code installs Codex inside the OpenAI extension rather than on
+    # the daemon's PATH.  Pick the newest matching extension so GOAL planning
+    # also works when Agent Hub is launched from an unrelated workspace.
+    extension_roots = [
+        Path.home() / ".vscode-server" / "extensions",
+        Path.home() / ".vscode" / "extensions",
+    ]
+    candidates = []
+    for root in extension_roots:
+        if not root.is_dir():
+            continue
+        candidates.extend(root.glob("openai.chatgpt-*/bin/*/codex"))
+    existing = [path for path in candidates if path.is_file()]
+    if existing:
+        return str(max(existing, key=lambda path: path.stat().st_mtime))
     return None
 
 
@@ -109,7 +127,14 @@ class CodexExecutor:
             )
 
         cwd = cwd or os.getcwd()
-        env = env or os.environ.copy()
+        env = (env or os.environ.copy()).copy()
+        # The VS Code extension host omits Codex's non-interactive marker.
+        # Without it, `codex exec` may keep an otherwise completed planner
+        # call alive indefinitely. Agent Hub never provides an interactive
+        # terminal, so force the CI contract explicitly.
+        env.setdefault("CODEX_CI", "1")
+        env.setdefault("TERM", "dumb")
+        env.setdefault("NO_COLOR", "1")
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -132,7 +157,20 @@ class CodexExecutor:
     async def _run_once(self, prompt: str, cwd: str, input_file: str = None,
                         env: dict = None) -> CodexResult:
         """Single Codex execution attempt."""
-        cmd = [self.codex_path, "exec", prompt]
+        # Planning/review is a bounded machine-to-machine JSON call. Keep it
+        # isolated from interactive project rules and persisted sessions; that
+        # avoids plugin/rule loading turning the GOAL row into a long spinner.
+        cmd = [
+            self.codex_path, "exec",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox", "read-only",
+            "--skip-git-repo-check",
+            "--color", "never",
+            prompt,
+        ]
+        process = None
 
         logger.info(f"Codex: {' '.join(cmd[:3])}... (cwd={cwd})")
 
@@ -141,8 +179,10 @@ class CodexExecutor:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
+                start_new_session=(sys.platform != "win32"),
             )
 
             stdout, stderr = await asyncio.wait_for(
@@ -156,14 +196,34 @@ class CodexExecutor:
                     logger.debug(f"Codex stderr: {err_str[:200]}")
 
             return CodexResult(output, process.returncode)
-        except asyncio.TimeoutError:
-            # Kill subprocess on timeout — don't leave orphaned processes
-            try:
-                process.kill()
-                await process.wait()
-            except Exception:
-                pass
+        except asyncio.CancelledError:
+            await self._terminate_process(process)
             raise
+        except asyncio.TimeoutError:
+            await self._terminate_process(process)
+            raise
+
+    async def _terminate_process(self, process) -> None:
+        """Stop an owned Codex subprocess (and its process group on POSIX)."""
+        if process is None or process.returncode is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                process.terminate()
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                if sys.platform == "win32":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+            except (ProcessLookupError, PermissionError):
+                pass
+        except (ProcessLookupError, PermissionError):
+            pass
 
     async def plan(self, goal: Dict[str, Any], cwd: str = None,
                    env: dict = None) -> CodexResult:
@@ -180,7 +240,10 @@ class CodexExecutor:
 
     def _build_plan_prompt(self, goal: Dict[str, Any]) -> str:
         return (
-            f"You are an AI research planner. Your goal:\n\n{goal['objective']}\n\n"
+            "You are an AI research planner. Do not call tools, inspect files, "
+            "or execute the requested work. Produce the JSON plan immediately "
+            "from the information below; Cline will execute it later.\n\n"
+            f"Your goal:\n\n{goal['objective']}\n\n"
             f"Completion criteria: {goal.get('completion_criteria', 'Not specified')}\n"
             f"Stop conditions: {goal.get('stop_conditions', 'Not specified')}\n"
             f"Iteration: {goal.get('iteration_count', 0)}/{goal.get('max_iterations', 10)}\n\n"
@@ -196,7 +259,9 @@ class CodexExecutor:
                              result_package: dict = None) -> str:
         result_str = json.dumps(result_package, indent=2) if result_package else "No results"
         return (
-            f"You are an AI code reviewer. Review the following task result.\n\n"
+            "You are an AI code reviewer. Do not call tools or inspect the "
+            "filesystem. Review only the bounded evidence supplied below and "
+            "return the requested JSON immediately.\n\n"
             f"Goal: {goal.get('objective', 'Unknown')[:500]}\n"
             f"Task: {task.get('prompt', 'Unknown')[:300]}\n"
             f"Task state: {task.get('state', 'Unknown')}\n"
@@ -223,10 +288,12 @@ class MockCodexExecutor:
         """
         self.plan_sequence = plan_sequence or []
         self._call_count = 0
+        self.call_cwds = []
         self.available = True
 
     async def run(self, prompt: str, cwd: str = None,
                   input_file: str = None, env: dict = None) -> CodexResult:
+        self.call_cwds.append(cwd)
         idx = min(self._call_count, len(self.plan_sequence) - 1)
         if idx < len(self.plan_sequence):
             result = self.plan_sequence[idx]

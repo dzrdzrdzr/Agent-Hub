@@ -42,12 +42,15 @@ class TrainingManager:
     def __init__(self, db: Database, task_manager=None,
                  event_manager=None,
                  stall_threshold: int = 300,
-                 logs_dir: str = ".agent-hub/logs/"):
+                 logs_dir: str = ".agent-hub/logs/",
+                 runtime_root: str = ""):
         self.db = db
         self.task_manager = task_manager
         self.event_manager = event_manager
         self.stall_threshold = stall_threshold
-        self.logs_dir = logs_dir
+        self.runtime_root = os.path.realpath(runtime_root or os.getcwd())
+        self.logs_dir = (os.path.realpath(logs_dir) if os.path.isabs(logs_dir)
+                         else os.path.realpath(os.path.join(self.runtime_root, logs_dir)))
         self._monitors = {}    # task_id -> asyncio.Task
         self._locks = {}       # task_id -> asyncio.Lock
         self._processes = {}   # task_id -> process info
@@ -67,7 +70,9 @@ class TrainingManager:
         """Request training from a Cline task's structured result. Idempotent."""
         task_id = task["id"]
         training_id = self.training_task_id(task_id)
-        cwd = training_cwd or task.get("cline_cwd") or os.getcwd()
+        cwd = training_cwd or task.get("cline_cwd") or task.get("training_cwd")
+        if not cwd:
+            raise ValueError(f"Task {task_id} has no working directory")
 
         # Idempotency: check if training task already exists
         existing = self.db.get_task(training_id)
@@ -92,6 +97,7 @@ class TrainingManager:
                 goal_id=task.get("goal_id"),
                 parent_task_id=task_id,
                 task_sequence=task.get("task_sequence", 0),
+                cline_cwd=cwd,
             )
         else:
             training_task = existing or {"id": training_id, "state": "TRAINING_QUEUED"}
@@ -164,7 +170,7 @@ class TrainingManager:
 
         # Setup log paths
         run_id = uuid.uuid4().hex[:8]
-        logs_dir = os.path.join(cwd, self.logs_dir, "training")
+        logs_dir = os.path.join(self.logs_dir, "training")
         os.makedirs(logs_dir, exist_ok=True)
         stdout_path = os.path.join(logs_dir, f"{task_id}.stdout.log")
         stderr_path = os.path.join(logs_dir, f"{task_id}.stderr.log")

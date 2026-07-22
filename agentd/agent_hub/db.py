@@ -3,12 +3,13 @@
 import os
 import sqlite3
 import threading
+import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS goals (
     started_at TEXT,
     completed_at TEXT,
     error_summary TEXT,
+    workspace_cwd TEXT NOT NULL DEFAULT '',
     skip_next_plan INTEGER NOT NULL DEFAULT 0,
     orchestrator_step TEXT NOT NULL DEFAULT ''
 );
@@ -291,6 +293,12 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+        if from_version < 6:
+            try:
+                conn.execute("ALTER TABLE goals ADD COLUMN workspace_cwd TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.db_path)
@@ -329,20 +337,27 @@ class Database:
             self._local.conn.close()
             self._local.conn = None
 
+    def get_schema_version(self) -> int:
+        row = self.fetch_one("SELECT MAX(version) AS version FROM schema_version")
+        return int(row["version"] or 0) if row else 0
+
     # ---- Task CRUD ----
 
     def create_task(self, task_id: str, task_type: str = "cline_exec",
                     prompt: str = "", priority: int = 0, max_retries: int = 1,
                     cline_exe_path: str = "", goal_id: str = None,
-                    parent_task_id: str = None, task_sequence: int = 0) -> Dict[str, Any]:
+                    parent_task_id: str = None, task_sequence: int = 0,
+                    cline_cwd: str = "") -> Dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO tasks (id, task_type, prompt, priority, max_retries,
-                   cline_exe_path, state, created_at, goal_id, parent_task_id, task_sequence)
-                   VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)""",
+                   cline_exe_path, state, created_at, goal_id, parent_task_id, task_sequence,
+                   cline_cwd)
+                   VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?)""",
                 (task_id, task_type, prompt, priority, max_retries,
-                 cline_exe_path, now, goal_id, parent_task_id, task_sequence)
+                 cline_exe_path, now, goal_id, parent_task_id, task_sequence,
+                 cline_cwd)
             )
             self._log_transition(conn, task_id, None, "QUEUED", "task_created")
         return self.get_task(task_id)
@@ -433,16 +448,18 @@ class Database:
     def create_goal(self, goal_id: str, objective: str, completion_criteria: str = "",
                     stop_conditions: str = "", max_iterations: int = 10,
                     max_failures: int = 3, model_call_budget: int = 100,
-                    review_mode: str = "auto") -> Dict[str, Any]:
+                    review_mode: str = "auto",
+                    workspace_cwd: str = "") -> Dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as conn:
             conn.execute(
                 """INSERT INTO goals (id, objective, state, completion_criteria,
                    stop_conditions, max_iterations, max_failures,
-                   model_call_budget, review_mode, created_at)
-                   VALUES (?, ?, 'GOAL_CREATED', ?, ?, ?, ?, ?, ?, ?)""",
+                   model_call_budget, review_mode, created_at, workspace_cwd)
+                   VALUES (?, ?, 'GOAL_CREATED', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (goal_id, objective, completion_criteria, stop_conditions,
-                 max_iterations, max_failures, model_call_budget, review_mode, now)
+                 max_iterations, max_failures, model_call_budget, review_mode, now,
+                 workspace_cwd)
             )
         return self.get_goal(goal_id)
 
@@ -663,6 +680,158 @@ class Database:
     def get_kv(self, key: str) -> Optional[str]:
         row = self.fetch_one("SELECT value FROM kv_store WHERE key = ?", (key,))
         return row["value"] if row else None
+
+    # ---- Goal deletion ----
+
+    def delete_goal(self, goal_id: str, logs_dir: str = "") -> Dict[str, Any]:
+        """Atomically delete a terminal goal and all linked records.
+
+        Only goals in terminal state (GOAL_COMPLETED, GOAL_FAILED,
+        GOAL_CANCELLED) can be deleted.  Active goals are rejected with a
+        ValueError.  In one transaction this collects every task linked to
+        the goal (including descendants via parent_task_id), deletes their
+        state_transitions / task_locks / events / model_calls / tasks,
+        deletes the goal's own events and model_calls, then deletes the
+        goal itself.
+
+        Returns a structured summary dict:
+          {goal_id, deleted_task_count, artifact_paths: [str, ...]}
+        where artifact_paths lists log / result files whose real path lies
+        inside the configured logs_dir so callers can optionally unlink
+        them.  Missing files are silently ignored.
+        """
+        terminal_states = {"GOAL_COMPLETED", "GOAL_FAILED", "GOAL_CANCELLED"}
+        goal = self.get_goal(goal_id)
+        if not goal:
+            raise ValueError(f"Goal {goal_id} not found")
+        if goal["state"] not in terminal_states:
+            raise ValueError(
+                f"Goal {goal_id} is in state {goal['state']}, not a terminal "
+                f"state.  Only terminal goals can be deleted."
+            )
+
+        # Resolve the canonical logs directory for safe-path checks.
+        _logs_dir = os.path.realpath(os.path.abspath(logs_dir)) if logs_dir else ""
+
+        def _is_safe(p: Optional[str]) -> bool:
+            if not p or not _logs_dir:
+                return False
+            try:
+                rp = os.path.realpath(os.path.abspath(p))
+                return rp.startswith(_logs_dir + os.sep) or rp == _logs_dir
+            except (OSError, ValueError):
+                return False
+
+        artifact_paths: List[str] = []
+        deleted_task_count = 0
+
+        with self.transaction() as conn:
+            # ---- Collect all task ids linked to this goal ----
+            # Direct children
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE goal_id = ?", (goal_id,)
+            ).fetchall()
+            task_ids = {r["id"] for r in rows}
+            # Expand descendants via parent_task_id (iterative BFS to
+            # avoid recursive SQL / CTE that may not be available).
+            queue = list(task_ids)
+            while queue:
+                parent = queue.pop()
+                sub = conn.execute(
+                    "SELECT id FROM tasks WHERE parent_task_id = ?", (parent,)
+                ).fetchall()
+                for s in sub:
+                    if s["id"] not in task_ids:
+                        task_ids.add(s["id"])
+                        queue.append(s["id"])
+
+            task_id_list = list(task_ids)
+
+            # Collect artifact paths before deletion.
+            if task_id_list:
+                placeholders = ",".join("?" * len(task_id_list))
+                task_rows = conn.execute(
+                    f"SELECT id, state, training_state, log_stdout, log_stderr, "
+                    f"training_log, result_file "
+                    f"FROM tasks WHERE id IN ({placeholders})",
+                    task_id_list,
+                ).fetchall()
+                live_states = {
+                    "CLINE_STARTING", "CLINE_RUNNING",
+                    "TRAINING_STARTING", "TRAINING_RUNNING",
+                }
+                live_tasks = [
+                    row["id"] for row in task_rows
+                    if row["state"] in live_states
+                    or row["training_state"] in live_states
+                ]
+                if live_tasks:
+                    raise ValueError(
+                        f"Goal {goal_id} still has running tasks: "
+                        f"{', '.join(sorted(live_tasks))}"
+                    )
+
+                # Only daemon-owned logs/result packages are eligible.  In
+                # particular, output_path and metrics_path may point into the
+                # user's project and must never be removed here.
+                for row in task_rows:
+                    for field in ("log_stdout", "log_stderr", "training_log", "result_file"):
+                        val = row[field]
+                        if val and _is_safe(val) and os.path.isfile(val):
+                            artifact_paths.append(val)
+
+                    prompt_path = os.path.join(
+                        _logs_dir, "cline", f"{row['id']}.prompt.txt"
+                    ) if _logs_dir else ""
+                    if prompt_path and _is_safe(prompt_path) and os.path.isfile(prompt_path):
+                        artifact_paths.append(prompt_path)
+
+            # ---- Delete task-scoped records ----
+            if task_id_list:
+                conn.execute(
+                    f"DELETE FROM state_transitions WHERE task_id IN ({placeholders})",
+                    task_id_list,
+                )
+                conn.execute(
+                    f"DELETE FROM task_locks WHERE holder_task_id IN ({placeholders})",
+                    task_id_list,
+                )
+                conn.execute(
+                    f"DELETE FROM events WHERE task_id IN ({placeholders})",
+                    task_id_list,
+                )
+                conn.execute(
+                    f"DELETE FROM model_calls WHERE task_id IN ({placeholders})",
+                    task_id_list,
+                )
+                # Delete the tasks themselves.
+                conn.execute(
+                    f"DELETE FROM tasks WHERE id IN ({placeholders})",
+                    task_id_list,
+                )
+                deleted_task_count = len(task_id_list)
+
+            # ---- Delete goal-scoped records ----
+            conn.execute(
+                "DELETE FROM events WHERE goal_id = ?", (goal_id,)
+            )
+            conn.execute(
+                "DELETE FROM model_calls WHERE goal_id = ?", (goal_id,)
+            )
+
+            # ---- Delete the goal ----
+            conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+
+            logging.getLogger(__name__).info(
+                "delete_goal %s: %d tasks, %d artifact paths",
+                goal_id, deleted_task_count, len(artifact_paths),
+            )
+
+        return {
+            "goal_id": goal_id,
+            "deleted_task_count": deleted_task_count,
+            "artifact_paths": artifact_paths,
+        }
 
     # ---- Janitor helpers ----
 

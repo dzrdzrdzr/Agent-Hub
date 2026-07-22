@@ -1,7 +1,4 @@
-"""Result package generation: metrics extraction, baseline comparison, review package.
-
-Produces a structured review package that Codex can consume for decision-making.
-"""
+"""Build bounded, structured evidence packages for Codex review."""
 
 import os
 import re
@@ -11,6 +8,37 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
+
+# Maximum bytes of stdout/stderr tail to include in review packages
+_LOG_TAIL_MAX_BYTES = 10240  # 10 KB per stream
+
+# ANSI escape sequence pattern for stripping
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape sequences from text."""
+    return _ANSI_RE.sub('', text)
+
+
+def _read_bounded_tail(filepath: str, max_bytes: int = _LOG_TAIL_MAX_BYTES) -> str:
+    """Read the tail of a log file, bounded to max_bytes, reverse-seek approach."""
+    if not filepath or not os.path.exists(filepath):
+        return "(no log file)"
+    try:
+        file_size = os.path.getsize(filepath)
+        if file_size == 0:
+            return "(empty log file)"
+        with open(filepath, "rb") as f:
+            if file_size <= max_bytes:
+                f.seek(0)
+                raw = f.read().decode("utf-8", errors="replace")
+            else:
+                f.seek(-max_bytes, os.SEEK_END)
+                raw = f.read().decode("utf-8", errors="replace")
+        return _strip_ansi(raw)
+    except OSError as e:
+        return f"(error reading log: {e})"
 
 
 class ResultPackager:
@@ -28,7 +56,7 @@ class ResultPackager:
         """Build a complete review package for Codex."""
 
         pkg = {
-            "package_version": "1.0",
+            "package_version": "1.1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "goal": self._goal_summary(goal),
             "task": self._task_summary(task),
@@ -37,6 +65,8 @@ class ResultPackager:
             "baseline_comparison": None,
             "changed_files": [],
             "test_results": None,
+            "cli_output": self._cli_output_tails(task),
+            "validation_evidence": self._validation_evidence(task),
             "issues": [],
             "recommendations": [],
         }
@@ -90,6 +120,79 @@ class ResultPackager:
             "retry_count": task.get("retry_count", 0),
             "training_requested": bool(task.get("training_requested")),
         }
+
+    def _cli_output_tails(self, task: Dict[str, Any]) -> Dict[str, str]:
+        """Return bounded, ANSI-stripped stdout and stderr tails from a task."""
+        stdout_path = task.get("log_stdout", "")
+        stderr_path = task.get("log_stderr", "")
+        return {
+            "stdout": _read_bounded_tail(stdout_path),
+            "stderr": _read_bounded_tail(stderr_path),
+        }
+
+    def _validation_evidence(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract validation evidence from task output.
+
+        Scans stdout for markers like PASS/FAIL/test results so the reviewer
+        can verify that expected outputs exist.
+        """
+        stdout_path = task.get("log_stdout", "")
+        evidence: Dict[str, Any] = {
+            "has_output": False,
+            "pass_count": 0,
+            "fail_count": 0,
+            "error_lines": [],
+            "markers_found": [],
+            "summary": "",
+        }
+        if not stdout_path or not os.path.exists(stdout_path):
+            return evidence
+
+        try:
+            raw = _read_bounded_tail(stdout_path, max_bytes=65536)
+            clean = _strip_ansi(raw)
+            evidence["has_output"] = bool(clean.strip())
+
+            # Count test pass/fail markers
+            pass_pattern = re.compile(r'\bPASS(?:ED)?\b', re.IGNORECASE)
+            fail_pattern = re.compile(r'\bFAIL(?:ED|URE)?\b', re.IGNORECASE)
+            pytest_pass = re.compile(r'\b(\d+)\s+passed\b', re.IGNORECASE)
+            pytest_fail = re.compile(r'\b(\d+)\s+failed\b', re.IGNORECASE)
+
+            evidence["pass_count"] = len(pass_pattern.findall(clean))
+            evidence["fail_count"] = len(fail_pattern.findall(clean))
+
+            for line in clean.splitlines():
+                m = pytest_pass.search(line)
+                if m:
+                    evidence["markers_found"].append(
+                        {"type": "pytest_passed", "value": int(m.group(1)),
+                         "line": line.strip()}
+                    )
+                m = pytest_fail.search(line)
+                if m:
+                    evidence["markers_found"].append(
+                        {"type": "pytest_failed", "value": int(m.group(1)),
+                         "line": line.strip()}
+                    )
+
+            for line in clean.splitlines():
+                if "error" in line.lower() or "traceback" in line.lower():
+                    evidence["error_lines"].append(line.strip()[:200])
+
+            parts = []
+            if evidence["pass_count"]:
+                parts.append(f"{evidence['pass_count']} PASS mentions")
+            if evidence["fail_count"]:
+                parts.append(f"{evidence['fail_count']} FAIL mentions")
+            if evidence["markers_found"]:
+                parts.append(f"{len(evidence['markers_found'])} test-marker matches")
+            evidence["summary"] = "; ".join(parts) or "(no test evidence found)"
+
+        except OSError as e:
+            evidence["summary"] = f"(error scanning output: {e})"
+
+        return evidence
 
     def _training_summary(self, task: Dict[str, Any],
                           training_results: Dict[str, Any] = None) -> Dict[str, Any]:

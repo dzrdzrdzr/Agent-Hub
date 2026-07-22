@@ -1,0 +1,859 @@
+{
+  "/data6/hanzaidao/GAUSS_26_4/GAUSS-test/GAUSS/outputs/shapebank_accepted_v4/shape_bank_accepted.pt": {
+    "file": "/data6/hanzaidao/GAUSS_26_4/GAUSS-test/GAUSS/outputs/shapebank_accepted_v4/shape_bank_accepted.pt",
+    "exists": true,
+    "top_keys": [
+      "model_type",
+      "schema_version",
+      "attention_model",
+      "bank_raw",
+      "active_prototype_mask",
+      "attention_model_state",
+      "epoch",
+      "metrics",
+      "config",
+      "v_ref_by_class",
+      "assignment_manifest",
+      "pose_manifest",
+      "accepted_for_inference",
+      "capacity_by_class",
+      "source_checkpoint"
+    ],
+    "state_keys": {
+      "prototype_codes": {
+        "shape": [
+          20,
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_queries": {
+        "shape": [
+          96,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "direct_bank_raw": {
+        "shape": [
+          20,
+          128,
+          96,
+          10
+        ],
+        "dtype": "torch.float32"
+      },
+      "active_mask": {
+        "shape": [
+          20,
+          128
+        ],
+        "dtype": "torch.bool"
+      },
+      "evidence_encoder.0.weight": {
+        "shape": [
+          32,
+          2,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.1.weight": {
+        "shape": [
+          32
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.1.bias": {
+        "shape": [
+          32
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.3.weight": {
+        "shape": [
+          64,
+          32,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.4.weight": {
+        "shape": [
+          64
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.4.bias": {
+        "shape": [
+          64
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.6.weight": {
+        "shape": [
+          128,
+          64,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.7.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.7.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.0.weight": {
+        "shape": [
+          128,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.0.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.2.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pool_score.weight": {
+        "shape": [
+          1,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pool_score.bias": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.float32"
+      },
+      "class_embedding.weight": {
+        "shape": [
+          20,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "router_query.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "router_key.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.0.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.0.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.1.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.3.weight": {
+        "shape": [
+          8,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.3.bias": {
+        "shape": [
+          8
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.in_proj_weight": {
+        "shape": [
+          384,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.in_proj_bias": {
+        "shape": [
+          384
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.out_proj.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.out_proj.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear1.weight": {
+        "shape": [
+          512,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear1.bias": {
+        "shape": [
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear2.weight": {
+        "shape": [
+          128,
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm1.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm2.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.in_proj_weight": {
+        "shape": [
+          384,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.in_proj_bias": {
+        "shape": [
+          384
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.out_proj.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.out_proj.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear1.weight": {
+        "shape": [
+          512,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear1.bias": {
+        "shape": [
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear2.weight": {
+        "shape": [
+          128,
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm1.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm2.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.norm.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.norm.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_head.weight": {
+        "shape": [
+          10,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_head.bias": {
+        "shape": [
+          10
+        ],
+        "dtype": "torch.float32"
+      }
+    },
+    "bank_raw_shape": [
+      20,
+      128,
+      96,
+      10
+    ],
+    "bank_raw_dtype": "torch.float32",
+    "active_mask_shape": [
+      20,
+      128
+    ],
+    "active_per_class": {
+      "1": 2,
+      "2": 2,
+      "3": 2,
+      "4": 2,
+      "5": 2,
+      "6": 2,
+      "7": 2,
+      "8": 2
+    },
+    "config_keys": {
+      "run_name": "A4_router_balance05",
+      "classes": "1,2,3,4,5,6,7,8",
+      "prototypes": "2",
+      "max_prototypes": "128",
+      "gaussians": "96",
+      "hidden_dim": "128",
+      "attention_heads": "4",
+      "decoder_layers": "2",
+      "stage": "router"
+    },
+    "schema_version": 2,
+    "model_type": "dynamic_growing_gaussian_shape_bank"
+  },
+  "/data6/hanzaidao/GAUSS_26_4/GAUSS-test/GAUSS/outputs/shapebank_router_recovery/A4_router_balance05/router_best.pt": {
+    "file": "/data6/hanzaidao/GAUSS_26_4/GAUSS-test/GAUSS/outputs/shapebank_router_recovery/A4_router_balance05/router_best.pt",
+    "exists": true,
+    "top_keys": [
+      "model_type",
+      "schema_version",
+      "attention_model",
+      "bank_raw",
+      "active_prototype_mask",
+      "attention_model_state",
+      "optimizer",
+      "scheduler",
+      "epoch",
+      "metrics",
+      "config",
+      "v_ref_by_class",
+      "assignment_manifest",
+      "pose_manifest"
+    ],
+    "state_keys": {
+      "prototype_codes": {
+        "shape": [
+          20,
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_queries": {
+        "shape": [
+          96,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "direct_bank_raw": {
+        "shape": [
+          20,
+          128,
+          96,
+          10
+        ],
+        "dtype": "torch.float32"
+      },
+      "active_mask": {
+        "shape": [
+          20,
+          128
+        ],
+        "dtype": "torch.bool"
+      },
+      "evidence_encoder.0.weight": {
+        "shape": [
+          32,
+          2,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.1.weight": {
+        "shape": [
+          32
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.1.bias": {
+        "shape": [
+          32
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.3.weight": {
+        "shape": [
+          64,
+          32,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.4.weight": {
+        "shape": [
+          64
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.4.bias": {
+        "shape": [
+          64
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.6.weight": {
+        "shape": [
+          128,
+          64,
+          3,
+          3,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.7.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "evidence_encoder.7.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.0.weight": {
+        "shape": [
+          128,
+          3
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.0.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.2.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "token_position.2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pool_score.weight": {
+        "shape": [
+          1,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pool_score.bias": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.float32"
+      },
+      "class_embedding.weight": {
+        "shape": [
+          20,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "router_query.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "router_key.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.0.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.0.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.1.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.3.weight": {
+        "shape": [
+          8,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "pose_head.3.bias": {
+        "shape": [
+          8
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.in_proj_weight": {
+        "shape": [
+          384,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.in_proj_bias": {
+        "shape": [
+          384
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.out_proj.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.self_attn.out_proj.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear1.weight": {
+        "shape": [
+          512,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear1.bias": {
+        "shape": [
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear2.weight": {
+        "shape": [
+          128,
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.linear2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm1.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm2.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.0.norm2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.in_proj_weight": {
+        "shape": [
+          384,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.in_proj_bias": {
+        "shape": [
+          384
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.out_proj.weight": {
+        "shape": [
+          128,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.self_attn.out_proj.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear1.weight": {
+        "shape": [
+          512,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear1.bias": {
+        "shape": [
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear2.weight": {
+        "shape": [
+          128,
+          512
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.linear2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm1.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm1.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm2.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.layers.1.norm2.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.norm.weight": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_decoder.norm.bias": {
+        "shape": [
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_head.weight": {
+        "shape": [
+          10,
+          128
+        ],
+        "dtype": "torch.float32"
+      },
+      "gaussian_head.bias": {
+        "shape": [
+          10
+        ],
+        "dtype": "torch.float32"
+      }
+    },
+    "bank_raw_shape": [
+      20,
+      128,
+      96,
+      10
+    ],
+    "bank_raw_dtype": "torch.float32",
+    "active_mask_shape": [
+      20,
+      128
+    ],
+    "active_per_class": {
+      "1": 2,
+      "2": 2,
+      "3": 2,
+      "4": 2,
+      "5": 2,
+      "6": 2,
+      "7": 2,
+      "8": 2
+    },
+    "config_keys": {
+      "run_name": "A4_router_balance05",
+      "classes": "1,2,3,4,5,6,7,8",
+      "prototypes": "2",
+      "max_prototypes": "128",
+      "gaussians": "96",
+      "hidden_dim": "128",
+      "attention_heads": "4",
+      "decoder_layers": "2",
+      "stage": "router"
+    },
+    "schema_version": 2,
+    "model_type": "dynamic_growing_gaussian_shape_bank"
+  }
+}

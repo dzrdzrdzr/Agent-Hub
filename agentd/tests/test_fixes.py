@@ -131,10 +131,12 @@ def test_v4_to_v5_migration():
         db_path = os.path.join(tmp, "state.sqlite")
         db = Database(db_path)
 
-        # Verify schema version is now 5
+        # Verify schema version is current after all migrations.
         cur = db.execute("SELECT MAX(version) FROM schema_version")
         row = cur.fetchone()
-        assert row[0] == 5, f"Expected schema version 5, got {row[0]}"
+        assert row[0] == SCHEMA_VERSION, (
+            f"Expected schema version {SCHEMA_VERSION}, got {row[0]}"
+        )
 
         # Verify v5 indexes exist
         # Check v5 indexes exist

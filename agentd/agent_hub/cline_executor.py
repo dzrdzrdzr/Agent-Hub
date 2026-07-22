@@ -87,10 +87,11 @@ class ClineExecutor:
     """Manages async Cline CLI subprocess execution."""
 
     def __init__(self, config: AgentdConfig, task_manager=None,
-                 safety_guard=None):
+                 safety_guard=None, runtime_root: str = ""):
         self.config = config
         self.safety_guard = safety_guard
         self.task_manager = task_manager
+        self.runtime_root = os.path.realpath(runtime_root or os.getcwd())
         self._event_manager = None  # set by main._wire_events
         self._running = {}       # task_id -> asyncio.Task (_wait_exit)
         self._processes = {}     # task_id -> subprocess.Popen
@@ -98,6 +99,20 @@ class ClineExecutor:
         self._locks = {}         # task_id -> asyncio.Lock (per-task serialization)
         self._pids = {}          # task_id -> int (for recovery reattach)
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cline-spawn")
+
+    def _resolve_logs_dir(self) -> str:
+        """Resolve runtime log directory against the Agent Hub daemon workspace.
+
+        Logs live under the daemon's own .agent-hub/logs regardless of which
+        project directory the Cline subprocess targets. This keeps arbitrary
+        projects free of Agent Hub artifacts.
+        """
+        # config.yaml logs.dir is relative to the daemon's working directory
+        # which is the workspace root. Resolve it absolutely.
+        logs_rel = self.config.logs.dir or ".agent-hub/logs/"
+        logs_base = (logs_rel if os.path.isabs(logs_rel)
+                     else os.path.join(self.runtime_root, logs_rel))
+        return os.path.realpath(os.path.join(logs_base, "cline"))
 
     def _get_lock(self, task_id: str) -> asyncio.Lock:
         if task_id not in self._locks:
@@ -138,14 +153,17 @@ class ClineExecutor:
         """Actual spawn logic, called under per-task lock."""
         task_id = task["id"]
         run_id = uuid.uuid4().hex[:8]
-        cwd = task.get("cline_cwd") or os.getcwd()
+        cwd = task.get("cline_cwd")
+        if not cwd:
+            raise ValueError(f"Task {task_id} has no cline_cwd")
 
         # Resolve Cline path
         cline_path = resolve_cline_path(self.config.cline.executable)
         logger.info(f"Cline path: {cline_path} (v{self.config.cline.executable})")
 
-        # Prepare log paths
-        logs_dir = os.path.join(cwd, self.config.logs.dir, "cline")
+        # Prepare log paths — always under the daemon workspace,
+        # NOT the target project cwd, so arbitrary projects stay clean.
+        logs_dir = self._resolve_logs_dir()
         os.makedirs(logs_dir, exist_ok=True)
         stdout_path = os.path.join(logs_dir, f"{task_id}.stdout.log")
         stderr_path = os.path.join(logs_dir, f"{task_id}.stderr.log")
@@ -158,6 +176,12 @@ class ClineExecutor:
         # Build command and environment
         cmd = self._build_cmd(cline_path, cwd, prompt_file, stdout_path, stderr_path)
         env = self._build_env(task_id, run_id)
+        # Keep the directory of the selected entry point (which may be a
+        # symlink). Conda/npm commonly place `cline` and `node` side by side;
+        # resolving the symlink would instead point inside node_modules and
+        # make the `#!/usr/bin/env node` shebang fail under VS Code's slim PATH.
+        cline_bin = os.path.dirname(os.path.abspath(cline_path))
+        env["PATH"] = cline_bin + os.pathsep + env.get("PATH", "")
 
         logger.info(f"Spawning Cline: {' '.join(cmd)} (task={task_id}, run={run_id})")
 
@@ -386,7 +410,9 @@ class ClineExecutor:
                 log_path = task.get("log_stdout", "")
                 if log_path and os.path.exists(log_path):
                     try:
-                        violations = self.safety_guard.audit_command_log(log_path)
+                        violations = self.safety_guard.audit_command_log(
+                            log_path, workspace_root=task.get("cline_cwd", "")
+                        )
                         if violations:
                             logger.warning(
                                 f"Cline {task_id}: safety audit found {len(violations)} violation(s)"

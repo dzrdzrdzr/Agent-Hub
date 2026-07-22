@@ -2,7 +2,7 @@
   "name": "agent-hub",
   "displayName": "Agent Hub",
   "description": "Planner \u2194 Executor bridge: a sidebar that lets AI coding agents (Codex, KimiCode) plan and review while delegating heavy code edits to Cline CLI. Submit tasks, watch live output, retry on failure \u2014 all from one panel.",
-  "version": "0.2.5",
+  "version": "0.2.8",
   "publisher": "agenthub",
   "license": "MIT",
   "engines": {
@@ -23,6 +23,11 @@
           "type": "string",
           "default": "",
           "description": "Python interpreter for the daemon (needs pyyaml + psutil). Empty = auto-detect from PATH and conda environments."
+        },
+        "agentHub.daemonRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Agent Hub source/install root containing agentd/agent_hub and config.yaml. Empty uses the bundled daemon, so tasks can target any open workspace."
         },
         "agentHub.port": {
           "type": "number",
@@ -79,6 +84,21 @@
       {
         "command": "agent-hub.refreshGoals",
         "title": "Agent Hub: Refresh Goals"
+      },
+      {
+        "command": "agent-hub.openGoalDetail",
+        "title": "Agent Hub: Open Goal Details",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "agent-hub.cancelGoal",
+        "title": "Agent Hub: Cancel Goal",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "agent-hub.deleteGoal",
+        "title": "Agent Hub: Delete Goal",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -91,6 +111,16 @@
         {
           "command": "agent-hub.refresh",
           "when": "view == agent-hub.tasks",
+          "group": "navigation"
+        },
+        {
+          "command": "agent-hub.startGoal",
+          "when": "view == agent-hub.goals",
+          "group": "navigation"
+        },
+        {
+          "command": "agent-hub.refreshGoals",
+          "when": "view == agent-hub.goals",
           "group": "navigation"
         }
       ],
@@ -107,6 +137,19 @@
         {
           "command": "agent-hub.cancelTask",
           "when": "view == agent-hub.tasks"
+        },
+        {
+          "command": "agent-hub.openGoalDetail",
+          "when": "view == agent-hub.goals && (viewItem == goalActive || viewItem == goalTerminal)",
+          "group": "inline"
+        },
+        {
+          "command": "agent-hub.cancelGoal",
+          "when": "view == agent-hub.goals && viewItem == goalActive"
+        },
+        {
+          "command": "agent-hub.deleteGoal",
+          "when": "view == agent-hub.goals && viewItem == goalTerminal"
         }
       ]
     },
@@ -136,7 +179,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "prepare-daemon": "node scripts/prepare-daemon.js",
+    "package": "npm run prepare-daemon && vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

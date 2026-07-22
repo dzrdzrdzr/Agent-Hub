@@ -53,18 +53,33 @@ class SafetyGuard:
         self.forbidden_commands = config.forbidden_commands or []
         self.allow_network = config.allow_network
 
-    def check(self, command: str, cwd: str = "", env: dict = None) -> SafetyResult:
-        """Run all safety checks. Returns SafetyResult."""
+    def check(self, command: str, cwd: str = "", env: dict = None,
+              workspace_root: str = "") -> SafetyResult:
+        """Run all safety checks. Returns SafetyResult.
+
+        Args:
+            command: The command string to check.
+            cwd: The working directory for the command execution.
+            env: Environment variables.
+            workspace_root: Explicit per-request workspace boundary.
+                           When provided, replaces the default self.workspace_root
+                           for all path containment checks.
+        """
         result = SafetyResult()
         env = env or {}
 
+        # Determine effective workspace boundary
+        effective_root = os.path.realpath(os.path.abspath(
+            workspace_root or self.workspace_root
+        ))
+
         # 1. CWD within project
-        cwd = os.path.abspath(cwd or self.workspace_root)
-        if not self._path_within(cwd, self.workspace_root):
+        cwd = os.path.abspath(cwd or effective_root)
+        if not self._path_within(cwd, effective_root):
             result.allowed = False
             result.risk = RiskLevel.CRITICAL
             result.checks_failed.append("cwd_outside_project")
-            result.details = f"CWD {cwd} is outside workspace {self.workspace_root}"
+            result.details = f"CWD {cwd} is outside workspace {effective_root}"
             return result
 
         # 2. Check for destructive commands
@@ -101,8 +116,9 @@ class SafetyGuard:
         redirect_targets = self._extract_redirects(command)
         for rt in redirect_targets:
             full = self._resolve_path(rt, cwd)
-            if full and not self._path_within(full, self.workspace_root):
-                result.risk = RiskLevel.HIGH
+            if full and not self._path_within(full, effective_root):
+                result.allowed = False
+                result.risk = RiskLevel.CRITICAL
                 result.checks_failed.append(f"redirect_outside_workspace: {rt}")
 
         # 7. Check for operations on main branch
@@ -147,13 +163,17 @@ class SafetyGuard:
             targets.append(m.group(1))
         return targets
 
-    def audit_command_log(self, log_path: str) -> List[str]:
+    def audit_command_log(self, log_path: str,
+                          workspace_root: str = "") -> List[str]:
         """Post-hoc audit of executed commands in Cline output log.
         
         Scans the log for dangerous commands that were actually run.
         Returns list of violations found.
         """
         violations = []
+        effective_root = os.path.realpath(os.path.abspath(
+            workspace_root or self.workspace_root
+        ))
         if not os.path.exists(log_path):
             return violations
 
@@ -178,8 +198,8 @@ class SafetyGuard:
             # Check for writes outside workspace
             for m in re.finditer(r'(?:>|>>)\s*(/[a-zA-Z/].*)', content):
                 path_out = m.group(1).strip()
-                full = self._resolve_path(path_out, self.workspace_root)
-                if full and not self._path_within(full, self.workspace_root):
+                full = self._resolve_path(path_out, effective_root)
+                if full and not self._path_within(full, effective_root):
                     violations.append(f"write_outside_workspace: {path_out}")
 
             # Check for network operations in non-network mode

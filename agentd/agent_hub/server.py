@@ -9,6 +9,21 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 
+def validate_workspace_cwd(raw_cwd: Any) -> str:
+    """Validate a client-selected project directory and return its real path."""
+    if not isinstance(raw_cwd, str) or not raw_cwd.strip():
+        raise ValueError("cwd is required and must be an absolute existing directory")
+    if not os.path.isabs(raw_cwd):
+        raise ValueError(f"cwd must be an absolute path, got: {raw_cwd}")
+
+    cwd = os.path.realpath(raw_cwd)
+    if cwd == os.path.abspath(os.sep):
+        raise ValueError("cwd must not be the filesystem root")
+    if not os.path.isdir(cwd):
+        raise ValueError(f"cwd is not a directory or does not exist: {raw_cwd}")
+    return cwd
+
+
 class IPCServer:
     """JSON-Lines IPC server over TCP with blocking wait_for_event support."""
 
@@ -26,6 +41,8 @@ class IPCServer:
         self.orchestrator = orchestrator
         self._server = None
         self._clients = set()
+        if self.orchestrator and hasattr(self.orchestrator, "set_push_callback"):
+            self.orchestrator.set_push_callback(self.push)
 
     async def start(self):
         ipc = self.config.ipc
@@ -143,8 +160,10 @@ class IPCServer:
                 "create_goal": self._h_create_goal,
                 "get_goal": self._h_get_goal,
                 "list_goals": self._h_list_goals,
+                "get_goal_tasks": self._h_get_goal_tasks,
                 "start_goal": self._h_start_goal,
                 "cancel_goal": self._h_cancel_goal,
+                "delete_goal": self._h_delete_goal,
                 "wait_for_event": self._h_wait_for_event,
                 "acknowledge_event": self._h_acknowledge_event,
                 "get_events": self._h_get_events,
@@ -155,7 +174,8 @@ class IPCServer:
 
     async def _h_submit_task(self, params):
         prompt = params["prompt"]
-        cwd = params.get("cwd", os.getcwd())
+        cwd = validate_workspace_cwd(params.get("cwd"))
+
         task_type = params.get("task_type", "cline_exec")
         goal_id = params.get("goal_id")
         parent_task_id = params.get("parent_task_id")
@@ -165,10 +185,11 @@ class IPCServer:
             task_type=task_type, prompt=prompt,
             goal_id=goal_id, parent_task_id=parent_task_id,
             task_sequence=task_sequence,
+            cline_cwd=cwd,
         )
 
         # Safety check
-        safety_result = self.safety_guard.check(prompt, cwd)
+        safety_result = self.safety_guard.check(prompt, cwd, workspace_root=cwd)
         if not safety_result.allowed:
             self.task_manager.transition(task["id"], "CANCELLED",
                                           trigger="safety_blocked")
@@ -326,16 +347,51 @@ class IPCServer:
             goals = self.goal_manager.db.get_all_goals()
         else:
             goals = self.goal_manager.get_active_goals()
+        # Attach accurate task count to each goal
+        for g in goals:
+            gid = g["id"]
+            count_row = self.goal_manager.db.fetch_one(
+                "SELECT COUNT(*) AS cnt FROM tasks WHERE goal_id = ?", (gid,)
+            )
+            g["task_count"] = count_row["cnt"] if count_row else 0
         return {"goals": goals}
+
+    async def _h_get_goal_tasks(self, params):
+        goal_id = params.get("goal_id")
+        if not isinstance(goal_id, str) or not goal_id.strip():
+            raise ValueError("goal_id is required")
+        tasks = self.goal_manager.db.fetch_all(
+            "SELECT * FROM tasks WHERE goal_id = ? ORDER BY task_sequence, created_at",
+            (goal_id,)
+        )
+        return {"goal_id": goal_id, "tasks": tasks}
 
     async def _h_start_goal(self, params):
         objective = params["objective"]
+        cwd = validate_workspace_cwd(params.get("cwd"))
+
         if not self.orchestrator:
             return {"error": "orchestrator_not_available"}
+        def positive_int(name):
+            value = params.get(name)
+            if value is None:
+                return None
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            return value
+
+        max_iterations = positive_int("max_iterations")
+        max_failures = positive_int("max_failures")
+        model_call_budget = positive_int("model_call_budget")
         goal = await self.orchestrator.start_goal(
             objective=objective,
             completion_criteria=params.get("completion_criteria", ""),
             stop_conditions=params.get("stop_conditions", ""),
+            max_iterations=max_iterations,
+            max_failures=max_failures,
+            model_call_budget=model_call_budget,
+            push_callback=self.push,
+            workspace_cwd=cwd,
         )
         return goal
 
@@ -345,8 +401,66 @@ class IPCServer:
             await self.orchestrator.cancel_goal(goal_id)
         else:
             self.goal_manager.cancel_goal(goal_id)
+            goal = self.goal_manager.get_goal(goal_id)
+            if goal:
+                await self.push("goal_state_changed", {
+                    "goal_id": goal["id"],
+                    "state": goal["state"],
+                    "objective": goal.get("objective", ""),
+                })
         goal = self.goal_manager.get_goal(goal_id)
         return goal
+
+    async def _h_delete_goal(self, params):
+        """Delete a terminal goal and all linked records.
+
+        Rejects missing goals and active goals.  Ensures no active
+        orchestration is associated with the goal.  After deletion pushes
+        a goal_deleted event so connected clients can refresh.
+        """
+        goal_id = params.get("goal_id")
+        if not isinstance(goal_id, str) or not goal_id.strip():
+            raise ValueError("goal_id is required")
+
+        # Reject if an active orchestration exists for this goal.
+        if self.orchestrator and hasattr(self.orchestrator, "_active_orchestrations"):
+            if goal_id in self.orchestrator._active_orchestrations:
+                raise ValueError(
+                    f"Goal {goal_id} has an active orchestration; "
+                    f"cancel the goal first before deleting."
+                )
+
+        # Resolve logs dir from config for safe artifact cleanup.
+        logs_dir = ""
+        if self.config and hasattr(self.config, "logs") and self.config.logs:
+            logs_dir = os.path.abspath(
+                os.path.join(os.getcwd(), self.config.logs.dir)
+            )
+
+        summary = self.goal_manager.delete_goal(goal_id, logs_dir=logs_dir)
+
+        # Safely remove artifact files whose real path is inside logs_dir.
+        if logs_dir:
+            _logs_real = os.path.realpath(os.path.abspath(logs_dir))
+            for p in summary.get("artifact_paths", []):
+                try:
+                    rp = os.path.realpath(os.path.abspath(p))
+                    if rp.startswith(_logs_real + os.sep) or rp == _logs_real:
+                        if os.path.exists(rp):
+                            os.remove(rp)
+                            logger.info("delete_goal: removed artifact %s", rp)
+                except OSError:
+                    pass  # missing file is harmless
+
+        await self.push("goal_deleted", {
+            "goal_id": goal_id,
+            "deleted_task_count": summary["deleted_task_count"],
+        })
+
+        return {
+            "goal_id": goal_id,
+            "deleted_task_count": summary["deleted_task_count"],
+        }
 
     async def _h_wait_for_event(self, params):
         """Block until a key event arrives. This is the critical API for

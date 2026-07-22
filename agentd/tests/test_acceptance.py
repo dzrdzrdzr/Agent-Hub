@@ -133,10 +133,11 @@ async def test_acceptance_full_pipeline():
         print("  [1/11] Submitting goal...")
         resp = await tcp_request("127.0.0.1", 19877, "start_goal", {
             "objective": "Acceptance test: train model and achieve loss < 0.1",
-            "completion_criteria": "Training loss < 0.1",
-            "max_iterations": 3,
-            "max_failures": 2,
-        })
+                "completion_criteria": "Training loss < 0.1",
+                "max_iterations": 3,
+                "max_failures": 2,
+                "cwd": workspace,
+            })
         goal_result = resp.get("result", {})
         goal_id = goal_result.get("id")
         assert goal_id, f"No goal_id in response: {resp}"

@@ -126,9 +126,10 @@ print("Training completed. loss=0.05 acc=0.95")
 
         goal = await orchestrator.start_goal(
             objective="Train a model to achieve loss < 0.1 and accuracy > 0.9",
-            completion_criteria="loss < 0.1, accuracy > 0.9",
-            max_iterations=5,
-            max_failures=2,
+                completion_criteria="loss < 0.1, accuracy > 0.9",
+                max_iterations=5,
+                max_failures=2,
+                workspace_cwd=tmp,
         )
 
         deadline = time.time() + 60
@@ -195,9 +196,9 @@ print("Done")
 """)
 
         # Create parent Cline task
-        parent = task_manager.create_task(
-            task_id="task-parent-001", task_type="cline_exec",
-            prompt="run training", goal_id="g1",
+            parent = task_manager.create_task(
+                task_id="task-parent-001", task_type="cline_exec",
+                prompt="run training", goal_id="g1", cline_cwd=tmp,
         )
 
         # First request_training
@@ -257,9 +258,9 @@ print("Training completed. loss=0.1 acc=0.9", flush=True)
 """)
 
         # Create parent Cline task
-        parent = task_manager.create_task(
-            task_id="task-parent-002", task_type="cline_exec",
-            prompt="run long training", goal_id="g2",
+            parent = task_manager.create_task(
+                task_id="task-parent-002", task_type="cline_exec",
+                prompt="run long training", goal_id="g2", cline_cwd=tmp,
         )
 
         # Request and spawn training
@@ -334,9 +335,9 @@ with open(os.path.join(output_dir, "result.json"), "w") as f:
 print("Done", flush=True)
 """)
 
-        parent = task_manager.create_task(
-            task_id="task-parent-003", task_type="cline_exec",
-            prompt="run training", goal_id="g3",
+            parent = task_manager.create_task(
+                task_id="task-parent-003", task_type="cline_exec",
+                prompt="run training", goal_id="g3", cline_cwd=tmp,
         )
 
         train_task = await training_manager.request_training(

@@ -50,7 +50,8 @@ class GoalManager:
     def create_goal(self, objective: str, completion_criteria: str = "",
                     stop_conditions: str = "", max_iterations: int = 10,
                     max_failures: int = 3, model_call_budget: int = 100,
-                    review_mode: str = "auto") -> Dict[str, Any]:
+                    review_mode: str = "auto",
+                    workspace_cwd: str = "") -> Dict[str, Any]:
         goal_id = f"goal-{uuid.uuid4().hex[:12]}"
         goal = self.db.create_goal(
             goal_id=goal_id, objective=objective,
@@ -60,6 +61,7 @@ class GoalManager:
             max_failures=max_failures,
             model_call_budget=model_call_budget,
             review_mode=review_mode,
+            workspace_cwd=workspace_cwd,
         )
         logger.info(f"Goal created: {goal_id}, objective: {objective[:80]}")
         return goal
@@ -155,13 +157,34 @@ class GoalManager:
             )
 
     def cancel_goal(self, goal_id: str) -> Dict[str, Any]:
+        self.set_orchestrator_step(goal_id, "")
         return self.transition(goal_id, "GOAL_CANCELLED", trigger="user_cancelled")
 
+    def delete_goal(self, goal_id: str, logs_dir: str = "") -> Dict[str, Any]:
+        """Delete a terminal goal and all linked data.
+
+        Only goals in GOAL_COMPLETED, GOAL_FAILED, or GOAL_CANCELLED state
+        can be deleted.  Active goals are rejected with a clear error.
+        Missing goal IDs are also rejected.  Returns the db.delete_goal
+        summary dict.
+        """
+        goal = self.db.get_goal(goal_id)
+        if not goal:
+            raise ValueError(f"Goal {goal_id} not found")
+        if goal["state"] not in TERMINAL_STATES:
+            raise ValueError(
+                f"Goal {goal_id} is in active state {goal['state']}; "
+                f"only terminal goals can be deleted.  Cancel the goal first."
+            )
+        return self.db.delete_goal(goal_id, logs_dir=logs_dir)
+
     def complete_goal(self, goal_id: str) -> Dict[str, Any]:
+        self.set_orchestrator_step(goal_id, "")
         return self.transition(goal_id, "GOAL_COMPLETED", trigger="criteria_met")
 
     def fail_goal(self, goal_id: str, reason: str = "") -> Dict[str, Any]:
-        self.db.update_goal_field(goal_id, error_summary=reason)
+        self.db.update_goal_field(goal_id, error_summary=reason,
+                                  orchestrator_step="")
         return self.transition(goal_id, "GOAL_FAILED", trigger=reason or "goal_failed")
 
     def should_continue(self, goal_id: str) -> bool:

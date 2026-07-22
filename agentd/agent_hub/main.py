@@ -134,8 +134,7 @@ async def _janitor_scan(db, logs_dir, retention_days=30, max_tasks=1000):
                     except OSError:
                         pass
             # Remove prompt file
-            cwd = task.get("cline_cwd") or os.getcwd()
-            prompt_file = os.path.join(cwd, ".agent-hub", "logs", "cline",
+            prompt_file = os.path.join(logs_dir, "cline",
                                         f"{task_id}.prompt.txt")
             if os.path.exists(prompt_file):
                 try:
@@ -193,7 +192,10 @@ async def main():
         cline_executor = MockClineExecutor(config, task_manager=task_manager)
         logger.info("  Cline: mock (explicitly enabled)")
     else:
-        cline_executor = ClineExecutor(config, task_manager=task_manager, safety_guard=safety_guard)
+        cline_executor = ClineExecutor(
+            config, task_manager=task_manager, safety_guard=safety_guard,
+            runtime_root=cwd,
+        )
     goal_manager = GoalManager(db)
     event_manager = EventManager(db)
     training_manager = TrainingManager(
@@ -201,6 +203,7 @@ async def main():
         event_manager=event_manager,
         stall_threshold=config.cline.stall_threshold_seconds,
         logs_dir=config.logs.dir,
+        runtime_root=cwd,
     )
 
     # Codex executor — mock mode overrides real CLI discovery

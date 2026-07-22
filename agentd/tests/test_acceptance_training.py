@@ -108,9 +108,10 @@ print("Training completed. loss=0.05 acc=0.95")
         print("  [1] Submitting goal with training...")
         resp = await tcp_request("127.0.0.1", 19878, "start_goal", {
             "objective": "Train model with python train.py, achieve loss < 0.1",
-            "completion_criteria": "loss < 0.1",
-            "max_iterations": 3, "max_failures": 1,
-        })
+                "completion_criteria": "loss < 0.1",
+                "max_iterations": 3, "max_failures": 1,
+                "cwd": workspace,
+            })
         goal_id = resp.get("result", {}).get("id")
         assert goal_id, f"No goal: {resp}"
         print(f"    Goal: {goal_id}")

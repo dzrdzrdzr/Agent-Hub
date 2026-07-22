@@ -13,11 +13,16 @@ export interface AgentHubApi {
     /** Submit a task to the daemon. Returns the task id. */
     submitTask(prompt: string, options?: { cwd?: string }): Promise<string>;
     cancelTask(taskId: string): Promise<void>;
-    startGoal(objective: string, options?: { max_iterations?: number; max_failures?: number }): Promise<any>;
+    startGoal(objective: string, options?: { max_iterations?: number; max_failures?: number; completion_criteria?: string; stop_conditions?: string; model_call_budget?: number; cwd?: string }): Promise<any>;
+    cancelGoal(goalId: string): Promise<any>;
+    deleteGoal(goalId: string): Promise<any>;
+    getGoalTasks(goalId: string): Promise<any>;
     waitForEvent(goalId?: string, eventTypes?: string[], timeout?: number): Promise<any>;
     getStatus(): Promise<any>;
     /** Fired when the daemon reports a task state change. */
     onDidChangeState: vscode.Event<{ task_id: string; state: string }>;
+    /** Fired when the daemon reports a goal state change. */
+    onDidChangeGoalState: vscode.Event<{ goal_id: string; state: string; objective: string }>;
 }
 
 let output: vscode.OutputChannel;
@@ -33,6 +38,7 @@ let bootPromise: Promise<void> | null = null;
 let sessionPanel: vscode.WebviewPanel | null = null;
 let sessionTaskId: string | null = null;
 let sessionTimer: NodeJS.Timeout | null = null;
+let extensionContext: vscode.ExtensionContext;
 
 // ---- Debounce helpers ----
 let _debounceRefreshTimer: NodeJS.Timeout | null = null;
@@ -62,8 +68,47 @@ function workspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
+interface DaemonLaunch {
+    sourceRoot: string;
+    runtimeRoot: string;
+}
+
+function isDaemonRoot(root: string): boolean {
+    return fs.existsSync(path.join(root, 'agentd', 'agent_hub', 'main.py'))
+        && fs.existsSync(path.join(root, 'config.yaml'));
+}
+
+function resolveDaemonLaunch(): DaemonLaunch {
+    const configured = vscode.workspace.getConfiguration('agentHub')
+        .get<string>('daemonRoot', '').trim();
+    if (configured) {
+        const sourceRoot = path.resolve(configured);
+        if (!isDaemonRoot(sourceRoot)) {
+            throw new Error(`agentHub.daemonRoot is invalid: ${sourceRoot}`);
+        }
+        return { sourceRoot, runtimeRoot: sourceRoot };
+    }
+
+    const workspace = workspaceRoot();
+    if (workspace && isDaemonRoot(workspace)) {
+        return { sourceRoot: workspace, runtimeRoot: workspace };
+    }
+
+    const bundled = path.join(extensionContext.extensionPath, 'daemon');
+    if (!isDaemonRoot(bundled)) {
+        throw new Error('Bundled Agent Hub daemon is missing; reinstall the VSIX or set agentHub.daemonRoot.');
+    }
+    const runtimeRoot = extensionContext.globalStorageUri.fsPath;
+    fs.mkdirSync(runtimeRoot, { recursive: true });
+    return { sourceRoot: bundled, runtimeRoot };
+}
+
 function isTerminal(state: string): boolean {
     return ['CLINE_SUCCEEDED', 'CLINE_FAILED', 'CLINE_STALLED', 'CANCELLED'].includes(state);
+}
+
+function isGoalTerminal(state: string): boolean {
+    return ['GOAL_COMPLETED', 'GOAL_FAILED', 'GOAL_CANCELLED'].includes(state);
 }
 
 function fmtTime(iso?: string): string {
@@ -93,6 +138,8 @@ class DaemonClient {
     private disposed = false;
     private _onDidChangeState = new vscode.EventEmitter<{ task_id: string; state: string }>();
     readonly onDidChangeState = this._onDidChangeState.event;
+    private _onDidChangeGoalState = new vscode.EventEmitter<{ goal_id: string; state: string; objective: string }>();
+    readonly onDidChangeGoalState = this._onDidChangeGoalState.event;
     private _onDidChangeConnection = new vscode.EventEmitter<boolean>();
     readonly onDidChangeConnection = this._onDidChangeConnection.event;
 
@@ -117,8 +164,23 @@ class DaemonClient {
     ensureConnected(): Promise<void> {
         if (this.connected) return Promise.resolve();
         if (this.connecting) return this.connecting;
-        this.connecting = this.open().finally(() => { this.connecting = null; });
+        this.connecting = this.open()
+            .catch((error) => {
+                this.scheduleReconnect();
+                throw error;
+            })
+            .finally(() => { this.connecting = null; });
         return this.connecting;
+    }
+
+    private scheduleReconnect(): void {
+        if (this.disposed || this.connected || this.reconnectTimer) return;
+        const delay = this.reconnectDelay;
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            this.ensureConnected().catch(() => { /* the failed attempt schedules the next one */ });
+        }, delay);
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
     }
 
     private open(): Promise<void> {
@@ -147,6 +209,10 @@ class DaemonClient {
 
     private attach(s: net.Socket): void {
         if (this.socket) this.socket.destroy();
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         this.socket = s;
         this.buffer = '';
         this.reconnectDelay = 2000;
@@ -188,19 +254,16 @@ class DaemonClient {
         }
         this.pending.clear();
         this._onDidChangeConnection.fire(false);
-
-        if (!this.disposed) {
-            this.reconnectTimer = setTimeout(() => {
-                this.reconnectTimer = null;
-                this.ensureConnected().catch(() => {});
-            }, this.reconnectDelay);
-            this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
-        }
+        this.scheduleReconnect();
     }
 
     private handlePush(event: string, data: any): void {
         if (event === 'state_changed') {
             this._onDidChangeState.fire(data);
+        } else if (event === 'goal_state_changed') {
+            this._onDidChangeGoalState.fire(data);
+        } else if (event === 'goal_deleted') {
+            this._onDidChangeGoalState.fire(data);
         }
     }
 
@@ -398,19 +461,32 @@ function setStatus(state: 'starting' | 'connected' | 'stopped'): void {
 async function findPython(): Promise<string> {
     if (cachedPython) return cachedPython;
     const cfg = vscode.workspace.getConfiguration('agentHub').get<string>('pythonPath', '');
-    if (cfg && fs.existsSync(cfg)) { cachedPython = cfg; return cfg; }
-    // Try common paths
+    // Configured pythonPath takes priority — validate it with real imports
+    if (cfg && cfg.trim()) {
+        const p = cfg.trim();
+        try {
+            const test = cp.spawnSync(p, ['-c', 'import yaml; import psutil; print("ok")'], { timeout: 10000 });
+            if (test.status === 0 && test.stdout.toString().trim() === 'ok') {
+                cachedPython = p;
+                log(`findPython: configured pythonPath OK: ${p}`);
+                return p;
+            }
+            log(`findPython: configured pythonPath ${p} failed yaml/psutil check: ${test.stderr?.toString() || test.error?.message || 'unknown'}`);
+        } catch (e: any) { log(`findPython: configured pythonPath ${p} spawn error: ${e?.message || e}`); }
+        // Fall through to auto-detect
+    }
+    // Try common paths with import validation
     for (const p of ['python3', 'python', '/usr/bin/python3', '/usr/bin/python']) {
         try {
-            const r = cp.spawnSync(p, ['-c', 'import sys; print(sys.executable)'], { timeout: 3000 });
+            const r = cp.spawnSync(p, ['-c', 'import sys, yaml, psutil; print(sys.executable)'], { timeout: 5000 });
             if (r.status === 0 && r.stdout) {
                 cachedPython = r.stdout.toString().trim();
+                log(`findPython: auto-detected ${cachedPython}`);
                 return cachedPython;
             }
         } catch { /* continue */ }
     }
-    cachedPython = 'python3';
-    return 'python3';
+    throw new Error('No Python with yaml and psutil found. Set agentHub.pythonPath to a compatible interpreter.');
 }
 
 async function ensureDaemon(forceStart: boolean = false): Promise<void> {
@@ -440,25 +516,30 @@ async function ensureDaemon(forceStart: boolean = false): Promise<void> {
             // Daemon not running — try to start it
         }
 
-        const cwd = workspaceRoot();
-        if (!cwd) throw new Error('No workspace folder open');
+        const launch = resolveDaemonLaunch();
+        const cwd = launch.runtimeRoot;
 
         const python = await findPython();
         setStatus('starting');
         log(`Starting daemon with ${python}...`);
 
-        const daemonScript = path.join(cwd, 'agentd', 'agent_hub', 'main.py');
-        const configPath = path.join(cwd, 'config.yaml');
+        const configPath = path.join(launch.sourceRoot, 'config.yaml');
         const env: any = { ...process.env };
-        env.PYTHONPATH = path.join(cwd, 'agentd');
+        env.PYTHONPATH = path.join(launch.sourceRoot, 'agentd');
         env.AGENT_HUB_CONFIG = configPath;
 
-        const child = cp.spawn(python, ['-B', '-u', '-m', 'agent_hub.main'], {
-            cwd,
-            env,
-            stdio: 'ignore',
-            detached: true,
-        });
+        let child: cp.ChildProcess;
+        try {
+            child = cp.spawn(python, ['-B', '-u', '-m', 'agent_hub.main'], {
+                cwd,
+                env,
+                stdio: 'ignore',
+                detached: true,
+            });
+        } catch (e: any) {
+            throw new Error(`Unable to spawn daemon with ${python}: ${e?.message || e}`);
+        }
+        child.once('error', (e) => log(`Daemon process error: ${e.message}`));
         child.unref();
 
         // Wait for daemon to come up (exponential backoff, max 15s)
@@ -477,8 +558,11 @@ async function ensureDaemon(forceStart: boolean = false): Promise<void> {
 
     try {
         await bootPromise;
-    } catch (e) {
+    } catch (e: any) {
         bootPromise = null;
+        lastError = e?.message || String(e);
+        log(`Daemon startup failed: ${lastError}`);
+        setStatus('stopped');
         throw e;
     }
 }
@@ -511,6 +595,89 @@ pre{white-space:pre-wrap;word-break:break-all;margin:0;padding:8px;background:va
 <pre>${escapeHtml(logText) || '<em>Waiting for output...</em>'}</pre>
 </body></html>`;
     } catch { /* ignore render errors */ }
+}
+
+async function openGoalDetail(goalId: string, context: vscode.ExtensionContext): Promise<void> {
+    if (!goalId) return;
+
+    const panel = vscode.window.createWebviewPanel(
+        'agentHub.goalDetail', `Goal: ${goalId.slice(-12)}`,
+        vscode.ViewColumn.One, { enableScripts: false, retainContextWhenHidden: true },
+    );
+
+    const render = async () => {
+        let html = `<html><head><style>
+            body { font-family: var(--vscode-editor-font-family); font-size: 13px; padding: 20px; color: var(--vscode-foreground); }
+            h2 { border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 8px; }
+            .section { margin: 16px 0; }
+            .label { font-weight: bold; color: var(--vscode-textLink-foreground); }
+            pre { background: var(--vscode-textCodeBlock-background); padding: 12px; border-radius: 4px; overflow-x: auto; max-height: 300px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid var(--vscode-panel-border); padding: 6px 10px; text-align: left; }
+            th { background: var(--vscode-toolbar-hoverBackground); }
+            .state-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+            .terminal { color: var(--vscode-errorForeground); }
+            .active { color: var(--vscode-textLink-foreground); }
+        </style></head><body>`;
+
+        try {
+            const [goalResp, tasksResp] = await Promise.all([
+                client.request('get_goal', { goal_id: goalId }, 5000),
+                client.request('get_goal_tasks', { goal_id: goalId }, 5000),
+            ]);
+            const g = goalResp || {};
+            const tasks = tasksResp?.tasks || [];
+
+            const state = g.state || '?';
+            html += `<h2>${escapeHtml(g.objective || goalId)}</h2>`;
+            html += `<div class="section"><span class="label">State:</span> <span class="${isGoalTerminal(state) ? 'terminal' : 'active'}">${escapeHtml(state)}</span></div>`;
+            html += `<div class="section"><span class="label">ID:</span> ${escapeHtml(goalId)}</div>`;
+            if (g.workspace_cwd) html += `<div class="section"><span class="label">Workspace:</span> ${escapeHtml(g.workspace_cwd)}</div>`;
+            if (g.completion_criteria) html += `<div class="section"><span class="label">Completion Criteria:</span> <pre>${escapeHtml(g.completion_criteria)}</pre></div>`;
+            if (g.stop_conditions) html += `<div class="section"><span class="label">Stop Conditions:</span> <pre>${escapeHtml(g.stop_conditions)}</pre></div>`;
+
+            html += `<div class="section">`;
+            html += `<span class="label">Iterations:</span> ${g.iteration_count || 0}/${g.max_iterations || '?'} &nbsp;`;
+            html += `<span class="label">Failures:</span> ${g.failure_count || 0}/${g.max_failures || '?'} &nbsp;`;
+            html += `<span class="label">Model Calls:</span> ${g.accumulated_model_calls || 0}/${g.model_call_budget || '?'}`;
+            html += `</div>`;
+
+            if (g.latest_codex_decision) {
+                try {
+                    const decision = typeof g.latest_codex_decision === 'string'
+                        ? JSON.parse(g.latest_codex_decision) : g.latest_codex_decision;
+                    html += `<div class="section"><span class="label">Latest Codex Decision:</span>`;
+                    html += `<pre>${escapeHtml(JSON.stringify(decision, null, 2))}</pre></div>`;
+                } catch { html += `<div class="section"><span class="label">Latest Codex Decision:</span> ${escapeHtml(String(g.latest_codex_decision))}</div>`; }
+            }
+
+            if (g.error_summary) html += `<div class="section"><span class="label">Errors:</span> <pre>${escapeHtml(g.error_summary)}</pre></div>`;
+            if (g.orchestrator_step) html += `<div class="section"><span class="label">Orchestrator Step:</span> ${escapeHtml(g.orchestrator_step)}</div>`;
+
+            html += `<h3>Linked Tasks (${tasks.length})</h3>`;
+            if (tasks.length > 0) {
+                html += `<table><tr><th>ID</th><th>State</th><th>Type</th><th>Prompt</th><th>Exit Code</th></tr>`;
+                for (const t of tasks) {
+                    html += `<tr><td>${escapeHtml((t.id || '').slice(-12))}</td>`;
+                    html += `<td>${escapeHtml(t.state || '?')}</td>`;
+                    html += `<td>${escapeHtml(t.task_type || '?')}</td>`;
+                    html += `<td>${escapeHtml((t.prompt || '').slice(0, 60))}</td>`;
+                    html += `<td>${t.cline_exit_code !== null ? t.cline_exit_code : '-'}</td></tr>`;
+                }
+                html += `</table>`;
+            } else {
+                html += `<p>No linked tasks.</p>`;
+            }
+
+        } catch (e: any) {
+            html += `<p class="terminal">Error loading goal: ${escapeHtml(e.message || String(e))}</p>`;
+        }
+
+        html += `</body></html>`;
+        panel.webview.html = html;
+    };
+
+    await render();
 }
 
 async function openTask(taskId: string): Promise<void> {
@@ -568,18 +735,41 @@ class GoalItem extends vscode.TreeItem {
         public readonly maxFailures: number,
         public readonly modelCalls: number,
         collapsibleState: vscode.TreeItemCollapsibleState,
+        public readonly isTaskChild?: boolean,
+        public readonly taskChildData?: any,
+        public readonly workspaceCwd?: string,
     ) {
         super(label, collapsibleState);
-        this.description = `${state} | iter=${iterationCount}/${maxIterations} | fail=${failureCount}/${maxFailures} | tasks=${taskCount} | mcalls=${modelCalls}`;
-        this.contextValue = 'goal';
-        if (state === 'GOAL_COMPLETED') { this.iconPath = new vscode.ThemeIcon('check'); }
-        else if (state === 'GOAL_FAILED' || state === 'GOAL_CANCELLED') { this.iconPath = new vscode.ThemeIcon('error'); }
-        else if (state === 'empty') { this.iconPath = new vscode.ThemeIcon('info'); }
-        else if (state === 'disconnected') { this.iconPath = new vscode.ThemeIcon('debug-disconnect'); }
-        else if (state.includes('EXECUTING') || state.includes('RUNNING')) {
-            this.iconPath = new vscode.ThemeIcon('sync~spin');
+        if (isTaskChild) {
+            this.description = (taskChildData?.state || '?') + ' | ' + ((taskChildData?.prompt || '').slice(0, 40));
+            this.contextValue = 'task';
+            this.command = { command: 'agent-hub.openTask', title: 'Watch Task', arguments: [taskChildData?.id] };
+            this.iconPath = new vscode.ThemeIcon('file-code');
+        } else {
+            this.description = `${state} | iter=${iterationCount}/${maxIterations} | fail=${failureCount}/${maxFailures} | tasks=${taskCount} | mcalls=${modelCalls}`;
+            if (workspaceCwd) {
+                this.tooltip = `ID: ${goalId}\nObjective: ${label}\nWorkspace: ${workspaceCwd}`;
+            } else {
+                this.tooltip = `ID: ${goalId}\nObjective: ${label}`;
+            }
+            // Assign context value based on terminal vs active state for
+            // conditional context-menu visibility (delete only for terminal).
+            const terminalStates = ['GOAL_COMPLETED', 'GOAL_FAILED', 'GOAL_CANCELLED'];
+            if (goalId) {
+                this.contextValue = terminalStates.includes(state) ? 'goalTerminal' : 'goalActive';
+            } else {
+                this.contextValue = 'goalStatus';
+            }
+            this.command = { command: 'agent-hub.openGoalDetail', title: 'Goal Detail', arguments: [goalId] };
+            if (state === 'GOAL_COMPLETED') { this.iconPath = new vscode.ThemeIcon('check'); }
+            else if (state === 'GOAL_FAILED' || state === 'GOAL_CANCELLED') { this.iconPath = new vscode.ThemeIcon('error'); }
+            else if (state === 'empty') { this.iconPath = new vscode.ThemeIcon('info'); }
+            else if (state === 'disconnected') { this.iconPath = new vscode.ThemeIcon('debug-disconnect'); }
+            else if (state.includes('EXECUTING') || state.includes('RUNNING') || state.includes('PLANNING')) {
+                this.iconPath = new vscode.ThemeIcon('sync~spin');
+            }
+            else { this.iconPath = new vscode.ThemeIcon('circle-outline'); }
         }
-        else { this.iconPath = new vscode.ThemeIcon('circle-outline'); }
     }
 }
 
@@ -590,7 +780,22 @@ class GoalTreeProvider implements vscode.TreeDataProvider<GoalItem> {
     refresh(): void { this._onDidChange.fire(undefined); }
 
     async getChildren(element?: GoalItem): Promise<GoalItem[]> {
-        if (element) { return []; }
+        if (element) {
+            // Expand a goal → show its linked tasks
+            if (element.isTaskChild) return [];
+            try {
+                const result = await client.request('get_goal_tasks', { goal_id: element.goalId }, 5000);
+                const tasks = result.tasks || [];
+                return tasks.map((t: any) => new GoalItem(
+                    t.id, (t.prompt || '').slice(0, 60), t.state || '?',
+                    0, 0, 0, 0, 0, 0,
+                    vscode.TreeItemCollapsibleState.None, true, t,
+                ));
+            } catch {
+                return [];
+            }
+        }
+        // Root level
         if (!client.connected) { return [
             new GoalItem('', 'Daemon not connected', 'disconnected', 0, 0, 0, 0, 0, 0, vscode.TreeItemCollapsibleState.None),
         ]; }
@@ -603,10 +808,11 @@ class GoalTreeProvider implements vscode.TreeDataProvider<GoalItem> {
             return goals.map((g: any) => new GoalItem(
                 g.id, g.objective?.slice(0, 60) || g.id,
                 g.state, g.iteration_count || 0, g.failure_count || 0,
-                (g.tasks?.length) || 0,
+                g.task_count ?? 0,
                 g.max_iterations || 5, g.max_failures || 3,
                 g.accumulated_model_calls || 0,
-                vscode.TreeItemCollapsibleState.None,
+                vscode.TreeItemCollapsibleState.Collapsed,
+                false, undefined, g.workspace_cwd || '',
             ));
         } catch { return []; }
     }
@@ -615,6 +821,7 @@ class GoalTreeProvider implements vscode.TreeDataProvider<GoalItem> {
 }
 
 export function activate(context: vscode.ExtensionContext): AgentHubApi {
+    extensionContext = context;
     output = vscode.window.createOutputChannel('Agent Hub');
     statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBar.name = 'Agent Hub';
@@ -624,10 +831,12 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
 	goalsProvider = new GoalTreeProvider();
 
     const api: AgentHubApi = {
-        version: '0.2.3',
+        version: '0.2.8',
         submitTask: async (prompt: string, options?: { cwd?: string }) => {
             await ensureDaemon(true);
-            const r = await client.request('submit_task', { prompt, cwd: options?.cwd ?? workspaceRoot() }, 15000);
+            const cwd = options?.cwd ?? workspaceRoot();
+            if (!cwd) throw new Error('No workspace folder open and no cwd was supplied');
+            const r = await client.request('submit_task', { prompt, cwd }, 15000);
             debouncedRefresh();
             return String(r.task_id);
         },
@@ -635,22 +844,40 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
             await client.request('cancel_task', { task_id: taskId });
             debouncedRefresh();
         },
-        startGoal: async (objective: string, options?: { max_iterations?: number; max_failures?: number }) => {
+        startGoal: async (objective: string, options?: { max_iterations?: number; max_failures?: number; completion_criteria?: string; stop_conditions?: string; model_call_budget?: number; cwd?: string }) => {
             await ensureDaemon(true);
-            const r = await client.request('start_goal', {
-                objective,
-                max_iterations: options?.max_iterations ?? 5,
-                max_failures: options?.max_failures ?? 3,
-            }, 15000);
+            const cwd = options?.cwd ?? workspaceRoot();
+            if (!cwd) throw new Error('No workspace folder open and no cwd was supplied');
+            const params: any = { objective, cwd };
+            if (options?.max_iterations !== undefined) params.max_iterations = options.max_iterations;
+            if (options?.max_failures !== undefined) params.max_failures = options.max_failures;
+            if (options?.completion_criteria !== undefined) params.completion_criteria = options.completion_criteria;
+            if (options?.stop_conditions !== undefined) params.stop_conditions = options.stop_conditions;
+            if (options?.model_call_budget !== undefined) params.model_call_budget = options.model_call_budget;
+            const r = await client.request('start_goal', params, 15000);
             debouncedRefresh();
             goalsProvider.refresh();
             return r;
+        },
+        cancelGoal: async (goalId: string) => {
+            await client.request('cancel_goal', { goal_id: goalId }, 10000);
+            goalsProvider.refresh();
+        },
+        deleteGoal: async (goalId: string) => {
+            const r = await client.request('delete_goal', { goal_id: goalId }, 15000);
+            goalsProvider.refresh();
+            provider.refresh();
+            return r;
+        },
+        getGoalTasks: async (goalId: string) => {
+            return await client.request('get_goal_tasks', { goal_id: goalId }, 5000);
         },
         waitForEvent: (goalId?: string, eventTypes?: string[], timeout?: number) => {
             return client.waitForEvent(goalId, eventTypes, timeout);
         },
         getStatus: () => client.request('get_status', {}, 5000),
         onDidChangeState: client.onDidChangeState,
+        onDidChangeGoalState: client.onDidChangeGoalState,
     };
 
     context.subscriptions.push(
@@ -666,8 +893,11 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
             if (!objective) return;
             try {
                 await ensureDaemon(true);
+                const cwd = workspaceRoot();
+                if (!cwd) throw new Error('Open a workspace folder before starting a goal');
                 const r = await client.request('start_goal', {
                     objective,
+                    cwd,
                     max_iterations: 5,
                     max_failures: 3,
                 }, 15000);
@@ -677,6 +907,39 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
             } catch (e: any) {
                 vscode.window.showErrorMessage(`Agent Hub: ${e?.message || e}`);
             }
+        }),
+        vscode.commands.registerCommand('agent-hub.cancelGoal', async (arg?: any) => {
+            const goalId = arg?.goalId ?? arg?.goal_id ?? (typeof arg === 'string' ? arg : undefined);
+            if (!goalId) return;
+            try {
+                await client.request('cancel_goal', { goal_id: goalId }, 10000);
+                goalsProvider.refresh();
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Agent Hub: ${e?.message || e}`);
+            }
+        }),
+        vscode.commands.registerCommand('agent-hub.deleteGoal', async (arg?: any) => {
+            const goalId = arg?.goalId ?? arg?.goal_id ?? (typeof arg === 'string' ? arg : undefined);
+            if (!goalId) return;
+            const confirm = await vscode.window.showWarningMessage(
+                `Delete goal ${goalId.slice(-12)} and all linked records? This removes its tasks, events, model-call records, and Agent Hub log files. Project outputs are kept. This action cannot be undone.`,
+                { modal: true },
+                'Delete',
+            );
+            if (confirm !== 'Delete') return;
+            try {
+                const r = await client.request('delete_goal', { goal_id: goalId }, 15000);
+                vscode.window.showInformationMessage(
+                    `Goal ${goalId.slice(-12)} deleted (${r.deleted_task_count} tasks removed).`);
+                goalsProvider.refresh();
+                provider.refresh();
+            } catch (e: any) {
+                vscode.window.showErrorMessage(`Agent Hub: ${e?.message || e}`);
+            }
+        }),
+        vscode.commands.registerCommand('agent-hub.openGoalDetail', async (arg: any) => {
+            const goalId = arg?.goalId ?? arg?.goal_id ?? (typeof arg === 'string' ? arg : undefined);
+            if (goalId) await openGoalDetail(String(goalId), context);
         }),
         vscode.commands.registerCommand('agent-hub.refreshGoals', () => goalsProvider.refresh()),
         vscode.commands.registerCommand('agent-hub.submitTask', async (arg?: any) => {
@@ -743,15 +1006,23 @@ export function activate(context: vscode.ExtensionContext): AgentHubApi {
         goalsProvider.refresh();
         if (sessionTaskId && e.task_id === sessionTaskId) void renderSession();
     });
+    client.onDidChangeGoalState(() => {
+        goalsProvider.refresh();
+        debouncedRefresh();
+    });
 
     setStatus('stopped');
     const timer = setInterval(() => {
-        if (client.connected) debouncedRefresh();
-    }, 3000);
+        if (client.connected) {
+            debouncedRefresh();
+        } else if (autoStart()) {
+            void ensureDaemon().catch(() => { /* logged and shown in status */ });
+        }
+    }, 10000);
     context.subscriptions.push({ dispose: () => clearInterval(timer) });
 
     // Boot in the background: never block activation on the daemon.
-    void ensureDaemon().catch(() => { /* status bar already reflects the failure */ });
+    void ensureDaemon().catch(() => { /* logged and shown in status */ });
 
     return api;
 }

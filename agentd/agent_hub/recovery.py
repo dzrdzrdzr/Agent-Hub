@@ -218,7 +218,6 @@ def _recover_events(db, event_manager) -> List[Dict]:
 
 def _build_log_path(task: Dict[str, Any], stream: str) -> str:
     """Build default log path from task metadata."""
-    cwd = task.get("cline_cwd") or os.getcwd()
     task_id = task["id"]
-    logs_dir = os.path.join(cwd, ".agent-hub", "logs", "cline")
+    logs_dir = os.path.join(os.getcwd(), ".agent-hub", "logs", "cline")
     return os.path.join(logs_dir, f"{task_id}.{stream}.log")

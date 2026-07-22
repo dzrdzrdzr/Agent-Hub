@@ -71,6 +71,7 @@ function names, expected behavior, and validation steps.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `agentHub.pythonPath` | `""` (auto) | Python interpreter for the daemon (needs `pyyaml`+`psutil`) |
+| `agentHub.daemonRoot` | `""` (bundled) | Optional daemon source/install root; leave empty to use the daemon bundled in the VSIX |
 | `agentHub.port` | `19876` | TCP port, must match `config.yaml` |
 | `agentHub.autoStartDaemon` | `true` | Start daemon on window open |
 
@@ -82,7 +83,7 @@ function names, expected behavior, and validation steps.
 ```ts
 await vscode.commands.executeCommand('agent-hub.submitTask', {
     prompt: 'refactor the parser module',
-    cwd: workspaceRoot, // optional
+    cwd: workspaceRoot, // optional; defaults to the active VS Code workspace
 });
 ```
 
@@ -91,18 +92,22 @@ await vscode.commands.executeCommand('agent-hub.submitTask', {
 const ext = vscode.extensions.getExtension('agenthub.agent-hub');
 const api = ext?.isActive ? ext.exports : await ext?.activate();
 const taskId = await api.submitTask('write unit tests for db.py');
+const goal = await api.startGoal('finish the current project', { cwd: workspaceRoot });
 api.onDidChangeState(({ task_id, state }) => {
     console.log(`Task ${task_id} → ${state}`);
 });
 ```
 
-API surface: `submitTask(prompt, {cwd?}) → taskId`, `cancelTask(taskId)`,
-`getStatus()`, `onDidChangeState`, `version` (0.2.3).
+API surface: `submitTask(prompt, {cwd?}) → taskId`, `startGoal(objective, {cwd?, ...})`,
+`cancelTask(taskId)`, `cancelGoal(goalId)`, `deleteGoal(goalId)`, `getGoalTasks(goalId)`, `getStatus()`,
+`onDidChangeState`, `onDidChangeGoalState`, `version` (0.2.8).
 
 ---
 
 ## Calling Agent Hub from a CLI agent (no VS Code APIs)
 
 Use `scripts/agent-hub.py` (stdlib-only) or raw JSON-Lines over TCP `127.0.0.1:19876`.
+`submit` and `goal` default `cwd` to the directory where the CLI command is invoked;
+the daemon never substitutes its own installation directory.
 See the workspace `AGENTS.md` for protocol details and the full decision tree on
 when to delegate vs. do it yourself.

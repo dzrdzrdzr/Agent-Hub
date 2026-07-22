@@ -37,7 +37,8 @@ class GoalOrchestrator:
                  training_manager=None, codex_executor=None,
                  safety_guard=None,
                  max_iterations: int = 10, max_failures: int = 3,
-                 event_wait_timeout: int = 60):
+                 event_wait_timeout: int = 60,
+                 codex_step_timeout: float = 60):
         self.db = db
         self.goal_manager = goal_manager
         self.event_manager = event_manager
@@ -49,8 +50,10 @@ class GoalOrchestrator:
         self.max_iterations = max_iterations
         self.max_failures = max_failures
         self.event_wait_timeout = event_wait_timeout
+        self.codex_step_timeout = codex_step_timeout
         self._active_orchestrations = {}  # goal_id -> asyncio.Task
         self._locks = {}  # goal_id -> asyncio.Lock
+        self._push_callback = None
         self.result_packager = ResultPackager()
 
     def _get_lock(self, goal_id: str) -> asyncio.Lock:
@@ -58,21 +61,70 @@ class GoalOrchestrator:
             self._locks[goal_id] = asyncio.Lock()
         return self._locks[goal_id]
 
+    def set_push_callback(self, callback):
+        """Register the daemon-wide goal state push callback."""
+        self._push_callback = callback
+
+    async def _push_goal_state(self, goal_id: str):
+        """Push the latest persisted goal state to connected clients."""
+        callback = self._push_callback
+        if callback:
+            try:
+                goal = self.goal_manager.get_goal(goal_id)
+                if goal:
+                    await callback("goal_state_changed", {
+                        "goal_id": goal["id"],
+                        "state": goal["state"],
+                        "objective": goal.get("objective", ""),
+                    })
+            except Exception:
+                logger.exception("Failed to push state for goal %s", goal_id)
+
+    async def _transition_goal(self, goal_id: str, new_state: str,
+                               trigger: str = "") -> Dict[str, Any]:
+        goal = self.goal_manager.transition(goal_id, new_state, trigger=trigger)
+        await self._push_goal_state(goal_id)
+        return goal
+
     async def start_goal(self, objective: str, completion_criteria: str = "",
                          stop_conditions: str = "",
                          max_iterations: int = None,
-                         max_failures: int = None) -> Dict[str, Any]:
-        """Start a new goal and begin autonomous execution."""
+                         max_failures: int = None,
+                         model_call_budget: int = None,
+                         push_callback=None,
+                         workspace_cwd: str = "") -> Dict[str, Any]:
+        """Start a new goal and begin autonomous execution.
+
+        Returns the goal with its post-transition state (GOAL_PLANNING, not GOAL_CREATED).
+        """
+        max_iterations = self.max_iterations if max_iterations is None else max_iterations
+        max_failures = self.max_failures if max_failures is None else max_failures
+        model_call_budget = model_call_budget if model_call_budget is not None else 100
+
+        for name, value in (("max_iterations", max_iterations),
+                            ("max_failures", max_failures),
+                            ("model_call_budget", model_call_budget)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
         goal = self.goal_manager.create_goal(
             objective=objective,
             completion_criteria=completion_criteria,
             stop_conditions=stop_conditions,
-            max_iterations=max_iterations or self.max_iterations,
-            max_failures=max_failures or self.max_failures,
+            max_iterations=max_iterations,
+            max_failures=max_failures,
+            model_call_budget=model_call_budget,
+            workspace_cwd=workspace_cwd,
         )
 
-        self.goal_manager.transition(goal["id"], "GOAL_PLANNING", trigger="orchestrator_start")
+        if push_callback:
+            self.set_push_callback(push_callback)
+        await self._transition_goal(goal["id"], "GOAL_PLANNING",
+                                    trigger="orchestrator_start")
         self.event_manager.emit_event("GOAL_CREATED", goal_id=goal["id"])
+
+        # Re-read the goal after transition to reflect current state
+        goal = self.goal_manager.get_goal(goal["id"])
 
         # Start the orchestration loop
         self._active_orchestrations[goal["id"]] = asyncio.create_task(
@@ -98,8 +150,8 @@ class GoalOrchestrator:
 
             # Set state
             if goal["state"] == "GOAL_PLANNING":
-                self.goal_manager.transition(goal_id, "GOAL_EXECUTING",
-                                              trigger="orchestrator_loop_start")
+                await self._transition_goal(goal_id, "GOAL_EXECUTING",
+                                            trigger="orchestrator_loop_start")
 
             # Restore checkpoint on restart
             goal = self.goal_manager.get_goal(goal_id)
@@ -230,23 +282,31 @@ class GoalOrchestrator:
             goal = self.goal_manager.get_goal(goal_id)
             if goal and goal["state"] not in TERMINAL_STATES:
                 if goal["iteration_count"] >= goal["max_iterations"]:
+                    self.goal_manager.set_orchestrator_step(goal_id, "")
                     self.goal_manager.fail_goal(goal_id, "max_iterations_reached")
                 elif goal["failure_count"] >= goal["max_failures"]:
+                    self.goal_manager.set_orchestrator_step(goal_id, "")
                     self.goal_manager.fail_goal(goal_id, "max_failures_reached")
                 else:
                     # Loop exited without explicit completion — treat as blocked/failed,
                     # never silently mark as completed
+                    self.goal_manager.set_orchestrator_step(goal_id, "")
                     self.goal_manager.fail_goal(goal_id, "review_blocked_or_unknown_verdict")
 
             self.event_manager.emit_event(closing_event, goal_id=goal_id)
+            await self._push_goal_state(goal_id)
 
         except asyncio.CancelledError:
             logger.info(f"Orchestrator cancelled for goal {goal_id}")
+            self.goal_manager.set_orchestrator_step(goal_id, "")
             self.event_manager.emit_event("GOAL_FAILED", goal_id=goal_id)
+            await self._push_goal_state(goal_id)
         except Exception as e:
             logger.error(f"Orchestrator error for goal {goal_id}: {e}")
+            self.goal_manager.set_orchestrator_step(goal_id, "")
             self.goal_manager.fail_goal(goal_id, f"orchestrator_error: {e}")
             self.event_manager.emit_event("GOAL_FAILED", goal_id=goal_id)
+            await self._push_goal_state(goal_id)
         finally:
             self._active_orchestrations.pop(goal_id, None)
 
@@ -257,7 +317,7 @@ class GoalOrchestrator:
         if goal.get("skip_next_plan"):
             return  # Already have a needs_changes fixup task pending
         self.goal_manager.increment_iteration(goal_id)
-        self.goal_manager.transition(goal_id, "GOAL_PLANNING", trigger="step_plan")
+        await self._transition_goal(goal_id, "GOAL_PLANNING", trigger="step_plan")
 
         # Record model call
         call_id = self.db.create_model_call(
@@ -268,11 +328,17 @@ class GoalOrchestrator:
         self.goal_manager.increment_model_calls(goal_id)
 
         try:
-            result = await self.codex_executor.plan(goal)
+            result = await asyncio.wait_for(
+                self.codex_executor.plan(
+                    goal, cwd=goal.get("workspace_cwd") or None
+                ),
+                timeout=self.codex_step_timeout,
+            )
             self.db.complete_model_call(call_id, "completed",
                                          result.verdict)
 
             if result.goal_complete:
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 self.goal_manager.complete_goal(goal_id)
                 return
 
@@ -286,11 +352,36 @@ class GoalOrchestrator:
                     prompt=task_prompt,
                     goal_id=goal_id,
                     task_sequence=goal["iteration_count"],
+                    cline_cwd=goal.get("workspace_cwd", ""),
                 )
                 self.goal_manager.set_current_task(goal_id, task["id"])
                 self.goal_manager.set_latest_decision(goal_id, result.parsed)
                 logger.info(f"Goal {goal_id}: planned task {task['id']}")
 
+        except asyncio.TimeoutError:
+            reason = f"codex_planner_timeout_{self.codex_step_timeout:g}s"
+            self.db.complete_model_call(call_id, "failed", reason)
+            decision = {
+                "verdict": "planner_timeout_fallback",
+                "goal_complete": False,
+                "reasoning": reason,
+                "next_task": {"prompt": goal["objective"],
+                              "task_type": "cline_exec"},
+            }
+            self.goal_manager.set_latest_decision(goal_id, decision)
+            if self.task_manager:
+                task = self.task_manager.create_task(
+                    task_type="cline_exec",
+                    prompt=goal["objective"],
+                    goal_id=goal_id,
+                    task_sequence=goal["iteration_count"],
+                    cline_cwd=goal.get("workspace_cwd", ""),
+                )
+                self.goal_manager.set_current_task(goal_id, task["id"])
+                logger.warning(
+                    "Goal %s: planner timed out; using objective as task %s",
+                    goal_id, task["id"],
+                )
         except Exception as e:
             self.db.complete_model_call(call_id, "failed", str(e)[:200])
             self.goal_manager.increment_failure(goal_id)
@@ -323,11 +414,14 @@ class GoalOrchestrator:
             # Safety check before spawning
             if hasattr(self, 'safety_guard') and self.safety_guard:
                 safety_result = self.safety_guard.check(
-                    task.get("prompt", ""), task.get("cline_cwd", "")
+                    task.get("prompt", ""), task.get("cline_cwd", ""),
+                    workspace_root=task.get("cline_cwd", ""),
                 )
                 if not safety_result.allowed:
+                    self.goal_manager.set_orchestrator_step(goal_id, "")
                     self.goal_manager.fail_goal(goal_id,
                         reason=f"safety_blocked: {safety_result.details}")
+                    await self._push_goal_state(goal_id)
                     logger.error(f"Goal {goal_id}: safety blocked task {task_id}")
                     return
                 if getattr(safety_result, 'requires_approval', False):
@@ -365,8 +459,8 @@ class GoalOrchestrator:
 
     async def _step_wait_cline(self, goal_id: str):
         """Wait for Cline completion event."""
-        self.goal_manager.transition(goal_id, "GOAL_WAITING_EVENT",
-                                      trigger="waiting_cline")
+        await self._transition_goal(goal_id, "GOAL_WAITING_EVENT",
+                                    trigger="waiting_cline")
         self.goal_manager.set_orchestrator_step(goal_id, "waiting_cline")
 
         # Poll task state first (handles mock/fast completion)
@@ -505,7 +599,7 @@ class GoalOrchestrator:
             logger.warning(f"Goal {goal_id}: training requested but no training_manager")
             return
 
-        self.goal_manager.transition(goal_id, "GOAL_EXECUTING", trigger="training_start")
+        await self._transition_goal(goal_id, "GOAL_EXECUTING", trigger="training_start")
         self.goal_manager.set_orchestrator_step(goal_id, "training")
 
         training_cmd = task.get("training_command", "")
@@ -618,7 +712,7 @@ class GoalOrchestrator:
                 reason="Codex CLI not available for review. Install Codex or enable cline.mock.")
             return False
 
-        self.goal_manager.transition(goal_id, "GOAL_REVIEWING", trigger="step_review")
+        await self._transition_goal(goal_id, "GOAL_REVIEWING", trigger="step_review")
         self.goal_manager.set_orchestrator_step(goal_id, "reviewing")
 
         task_id = goal.get("current_task_id")
@@ -636,8 +730,17 @@ class GoalOrchestrator:
         self.goal_manager.increment_model_calls(goal_id)
 
         try:
-            result = await self.codex_executor.review(goal, task, result_package)
+            result = await asyncio.wait_for(
+                self.codex_executor.review(
+                    goal, task, result_package,
+                    cwd=goal.get("workspace_cwd") or None,
+                ),
+                timeout=self.codex_step_timeout,
+            )
             self.db.complete_model_call(call_id, "completed", result.verdict)
+
+            # Persist the Codex review decision so it survives restarts
+            self.goal_manager.set_latest_decision(goal_id, result.parsed)
 
             self.event_manager.emit_event(
                 "CODEX_REVIEW_COMPLETED",
@@ -646,15 +749,22 @@ class GoalOrchestrator:
             )
 
             if result.goal_complete:
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 self.goal_manager.complete_goal(goal_id)
                 return False
 
             if result.verdict in ("approved", "goal_achieved"):
-                self.goal_manager.transition(goal_id, "GOAL_ITERATING",
-                                              trigger="review_approved")
+                await self._transition_goal(goal_id, "GOAL_ITERATING",
+                                            trigger="review_approved")
                 self.goal_manager.set_orchestrator_step(goal_id, "")
                 return True  # continue loop
             elif result.verdict == "needs_changes":
+                latest_goal = self.goal_manager.get_goal(goal_id)
+                if (latest_goal and
+                        latest_goal["iteration_count"] >= latest_goal["max_iterations"]):
+                    self.goal_manager.fail_goal(goal_id,
+                                                reason="max_iterations_reached")
+                    return False
                 next_task = result.next_task
                 if next_task and self.task_manager:
                     task_prompt = next_task.get("prompt", "")
@@ -663,20 +773,39 @@ class GoalOrchestrator:
                         prompt=task_prompt,
                         goal_id=goal_id,
                         task_sequence=goal["iteration_count"] + 1,
+                        cline_cwd=goal.get("workspace_cwd", ""),
                     )
                     self.goal_manager.set_current_task(goal_id, new_task["id"])
-                self.goal_manager.transition(goal_id, "GOAL_ITERATING",
-                                              trigger="review_needs_changes")
+                await self._transition_goal(goal_id, "GOAL_ITERATING",
+                                            trigger="review_needs_changes")
                 # Set flag to skip next planning — execute the fixup task directly
                 self.goal_manager.set_skip_next_plan(goal_id)
                 self.goal_manager.set_orchestrator_step(goal_id, "")
                 return True
             else:
                 # blocked or unknown verdict — stop and fail
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 self.goal_manager.fail_goal(goal_id,
                     reason=f"review_verdict:{result.verdict}")
                 return False
 
+        except asyncio.TimeoutError:
+            reason = f"codex_review_timeout_{self.codex_step_timeout:g}s"
+            self.db.complete_model_call(call_id, "failed", reason)
+            self.goal_manager.increment_failure(goal_id)
+            self.goal_manager.set_latest_decision(goal_id, {
+                "verdict": "review_timeout",
+                "goal_complete": False,
+                "reasoning": reason,
+            })
+            self.goal_manager.set_orchestrator_step(goal_id, "")
+            self.goal_manager.fail_goal(goal_id, reason=reason)
+            self.event_manager.emit_event(
+                "GOAL_FAILED", goal_id=goal_id, task_id=task_id,
+                payload={"reason": reason},
+            )
+            await self._push_goal_state(goal_id)
+            return False
         except Exception as e:
             self.db.complete_model_call(call_id, "failed", str(e)[:200])
             self.goal_manager.increment_failure(goal_id)
@@ -751,10 +880,12 @@ class GoalOrchestrator:
         goal = self.goal_manager.get_goal(goal_id)
         if goal:
             if goal["state"] not in ("GOAL_CANCELLED", "GOAL_COMPLETED", "GOAL_FAILED"):
+                self.goal_manager.set_orchestrator_step(goal_id, "")
                 self.goal_manager.cancel_goal(goal_id)
 
         # Emit only GOAL_CANCELLED, never GOAL_FAILED
         self.event_manager.emit_event("GOAL_CANCELLED", goal_id=goal_id)
+        await self._push_goal_state(goal_id)
 
         task = self._active_orchestrations.pop(goal_id, None)
         if task:

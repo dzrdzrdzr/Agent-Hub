@@ -94,8 +94,14 @@ PYTHONPATH="$PWD/agentd" AGENT_HUB_CONFIG="$PWD/config.yaml" \
 # 验证 daemon 存活
 python3 scripts/agent-hub.py ping
 
-# 提交任务
+# 提交任务；未写 --cwd 时自动使用调用命令所在目录
 python3 scripts/agent-hub.py submit "你的 prompt（越具体越好）"
+
+# 从任意项目目录启动一个 GOAL
+python3 /path/to/Codex_Cline/scripts/agent-hub.py goal "完成当前项目的测试修复"
+
+# 5. 删除已完成的目标（清理数据库和日志）
+python3 scripts/agent-hub.py delete-goal <goal-id>
 
 # 查看状态
 python3 scripts/agent-hub.py status
@@ -109,7 +115,10 @@ python3 scripts/agent-hub.py cancel <task-id>
 
 ### 3. VS Code 扩展（可选）
 
-安装扩展后，侧边栏直接操作，无需手动敲命令。
+安装扩展后，侧边栏直接操作，无需手动敲命令。任务和 GOAL 会携带当前
+VS Code workspace 的绝对目录；daemon 可以运行在 Agent Hub 自己的目录，
+实际 Cline 子进程会在目标项目目录执行。VSIX 内含 daemon 源码，因此从其他
+工程首次打开时也能自动启动；开发时可用 `agentHub.daemonRoot` 指定本仓库。
 
 ---
 

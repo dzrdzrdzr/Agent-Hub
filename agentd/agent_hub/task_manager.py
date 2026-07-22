@@ -82,7 +82,8 @@ class TaskManager:
                     cline_exe_path: str = "",
                     goal_id: str = None, parent_task_id: str = None,
                     task_sequence: int = 0,
-                    task_id: str = None) -> Dict[str, Any]:
+                    task_id: str = None,
+                    cline_cwd: str = "") -> Dict[str, Any]:
         task_id = task_id or f"task-{uuid.uuid4().hex[:12]}"
         task = self.db.create_task(
             task_id=task_id, task_type=task_type, prompt=prompt,
@@ -90,6 +91,7 @@ class TaskManager:
             cline_exe_path=cline_exe_path,
             goal_id=goal_id, parent_task_id=parent_task_id,
             task_sequence=task_sequence,
+            cline_cwd=cline_cwd,
         )
         logger.info(f"Task created: {task_id} (type={task_type})")
         return task
