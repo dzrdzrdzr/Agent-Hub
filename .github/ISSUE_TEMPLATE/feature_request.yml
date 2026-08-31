@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused improvement to supervision, recovery, orchestration, or observability.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operational problem
+      description: Describe the failure mode or repeated manual work.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Safety and lifecycle invariants
+      description: Explain retry bounds, process ownership, persistence, and failure handling.
+    validations:
+      required: true

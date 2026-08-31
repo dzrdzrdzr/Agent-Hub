@@ -1,10 +1,15 @@
+# Safe baseline configuration.
+# Put machine-specific paths, proxies, and environment variables in
+# config.local.yaml and point AGENT_HUB_CONFIG to that file.
+
 agentd:
   ipc:
     transport: tcp
     tcp_host: 127.0.0.1
     tcp_port: 19876
+
   cline:
-    executable: auto                       # auto-discovery via PATH; set absolute path if needed
+    executable: auto
     timeout_seconds: 600
     stall_threshold_seconds: 300
     max_retries: 1
@@ -14,13 +19,14 @@ agentd:
     kill_on_shutdown: false
     retention_days: 30
     max_task_history: 1000
-    env:
-      HTTP_PROXY: http://127.0.0.1:17898
-      HTTPS_PROXY: http://127.0.0.1:17898
+    env: {}
+
   database:
     path: .agent-hub/state.sqlite
+
   logs:
     dir: .agent-hub/logs/
+
   safety:
     protected_paths: []
     forbidden_commands: []

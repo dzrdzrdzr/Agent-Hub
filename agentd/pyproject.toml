@@ -5,8 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-hub-daemon"
 version = "0.2.0"
-description = "Agent Hub task daemon"
+description = "Local supervisor and planner-executor bridge for long-running AI coding agents."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Zaidao Han" }
+]
+keywords = [
+    "ai-agents",
+    "coding-agents",
+    "codex",
+    "cline",
+    "deepseek",
+    "process-supervisor",
+    "vscode"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools"
+]
 dependencies = [
     "pyyaml>=6.0",
     "psutil>=5.9",
@@ -14,10 +39,21 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.0",
 ]
 
+[project.scripts]
+agent-hub = "agent_hub.cli:main"
+agent-hub-daemon = "agent_hub.main:run"
+
+[project.urls]
+Homepage = "https://github.com/dzrdzrdzr/Agent-Hub"
+Repository = "https://github.com/dzrdzrdzr/Agent-Hub"
+Issues = "https://github.com/dzrdzrdzr/Agent-Hub/issues"
+
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["agent_hub*"]

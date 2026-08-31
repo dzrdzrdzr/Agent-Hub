@@ -1,10 +1,36 @@
 {
   "name": "agent-hub",
-  "displayName": "Agent Hub",
-  "description": "Planner \u2194 Executor bridge: a sidebar that lets AI coding agents (Codex, KimiCode) plan and review while delegating heavy code edits to Cline CLI. Submit tasks, watch live output, retry on failure \u2014 all from one panel.",
+  "displayName": "Agent Hub — AI Agent Supervisor",
+  "description": "Persist, monitor, recover, and control long-running Codex/Cline coding-agent tasks from VS Code.",
   "version": "0.2.8",
   "publisher": "agenthub",
   "license": "MIT",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dzrdzrdzr/Agent-Hub.git"
+  },
+  "homepage": "https://github.com/dzrdzrdzr/Agent-Hub#readme",
+  "bugs": {
+    "url": "https://github.com/dzrdzrdzr/Agent-Hub/issues"
+  },
+  "keywords": [
+    "ai agents",
+    "coding agents",
+    "codex",
+    "cline",
+    "deepseek",
+    "process supervisor",
+    "remote ssh"
+  ],
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "galleryBanner": {
+    "color": "#111827",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -178,6 +204,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "check": "tsc -p ./ --noEmit",
     "watch": "tsc -watch -p ./",
     "prepare-daemon": "node scripts/prepare-daemon.js",
     "package": "npm run prepare-daemon && vsce package"
