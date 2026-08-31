@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install daemon and test dependencies
+        run: python -m pip install -e "./agentd[dev]"
+      - name: Provide a deterministic Cline executable for discovery tests
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-hub-bin"
+          cat > "$RUNNER_TEMP/agent-hub-bin/cline" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "cline-ci 0.0.0"
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/agent-hub-bin/cline"
+          echo "$RUNNER_TEMP/agent-hub-bin" >> "$GITHUB_PATH"
+      - name: Run tests
+        env:
+          AGENT_HUB_CONFIG: ${{ github.workspace }}/config.test.yaml
+        run: pytest agentd/tests -q
+
+  extension:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+      - run: npm run compile
+      - name: Package smoke test
+        run: npm run package -- --out ../agent-hub-ci.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-hub-vsix
+          path: agent-hub-ci.vsix

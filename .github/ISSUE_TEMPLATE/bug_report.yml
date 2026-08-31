@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible daemon, CLI, recovery, or VS Code extension problem.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Python daemon
+        - CLI
+        - Goal orchestration
+        - Cline execution
+        - Training monitoring
+        - Recovery
+        - VS Code extension
+        - Packaging / installation
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Version or commit
+      placeholder: v0.2.8 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Ubuntu 24.04, Python 3.12, VS Code Remote SSH
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence of commands or actions.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+      description: Remove tokens, prompts containing private code, hostnames, absolute personal paths, and credentials.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive data
+      options:
+        - label: I removed credentials, private source, personal paths, and identifying host information.
+          required: true

@@ -1,7 +1,12 @@
 .agent-control/
 .agent-hub/
+.venv/
+venv/
 *.pyc
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
 *.egg-info/
 dist/
 build/
@@ -12,3 +17,5 @@ extension/daemon/
 *.log
 config.local.yaml
 .env
+.DS_Store
+Thumbs.db

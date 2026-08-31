@@ -1,192 +1,258 @@
 # Agent Hub
 
-> **让 Codex 低消耗指挥 DeepSeek，持续完成模型修改、训练、调参和结果审查闭环的常驻 Agent 控制系统。**
+[![CI](https://github.com/dzrdzrdzr/Agent-Hub/actions/workflows/ci.yml/badge.svg)](https://github.com/dzrdzrdzr/Agent-Hub/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-74c7a2)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)](agentd/pyproject.toml)
+[![VS Code](https://img.shields.io/badge/VS%20Code-extension-4aa3ff)](extension)
 
----
+**A local supervisor for long-running AI coding agents: persist tasks, detect stalls, recover processes, monitor training, and let a planning agent delegate execution without keeping VS Code or SSH attached.**
 
-## 目标
+[中文说明](docs/README.zh-CN.md) · [Architecture](DESIGN.md) · [Extension guide](extension/README.md) · [Report a bug](https://github.com/dzrdzrdzr/Agent-Hub/issues/new?template=bug_report.yml)
 
-大模型做复杂工程时有一个根本矛盾：**最强的规划模型（Codex、KimiCode）token 昂贵，最强的执行模型（DeepSeek、Cline）需要持续运行数小时甚至数天。** 人类工程师不可能盯着终端看几个小时。
+> Project status: **alpha**. The core daemon, CLI, goal orchestration, recovery, and VS Code sidebar are implemented, but the project still targets technical users who can inspect local processes and logs.
 
-Agent Hub 解决的就是这个分工问题：
+## The problem
 
-```
-Codex / KimiCode          →  制定目标、审查修改、分析实验、决定下一步
-     │                           (只在真正需要判断时介入)
-     │ 委派任务
-     ▼
-Agent Hub (守护进程)       →  持续监控、等待、调度、恢复
-     │                           (把所有机械工作自动化)
-     │ 调度执行
-     ▼
-Cline + DeepSeek           →  改代码、跑测试、启动训练、整理结果
-                                 (持续执行数小时，无需人工监护)
-```
+Long coding-agent jobs often fail for operational reasons rather than model quality:
 
-**一句话概括**：你负责"要做什么"，Agent Hub 负责盯着 DeepSeek 执行，你只需要回来看结果。
+- the VS Code or SSH session disconnects;
+- an executor stalls without exiting;
+- a training process outlives the agent that launched it;
+- the planner wastes tokens polling logs;
+- a daemon restart loses track of work;
+- a retry starts the same task twice.
 
-具体能力：
+Agent Hub moves those mechanics into a local daemon.
 
-- **检查 Cline 是否完成、卡死或暴毙**——持续 stall 检测 + PID 追踪
-- **检查训练是否运行、结束或异常**——监控子进程、日志 mtime、退出码
-- **自动恢复和有限重试**——daemon 重启后 re-attach 到存活任务，不重复启动
-- **VS Code 或 SSH 断开后继续运行**——Cline 和训练进程独立于 daemon 生命周期
-- **等待过程中不消耗 Codex 或 DeepSeek token**——只有状态变化时才推送通知
-
----
-
-## 架构
-
-```
-┌─────────────────────────────────┐
-│  VS Code 扩展 (extension/)      │  ← 侧边栏 UI：提交任务、查看状态、实时输出
-│  CLI 客户端 (scripts/)          │  ← 任何 shell/脚本 都能提交任务
-└───────────┬─────────────────────┘
-            │ TCP 127.0.0.1:19876 (JSON-Lines)
-┌───────────▼─────────────────────┐
-│  守护进程 agentd/ (Python)      │
-│  ┌───────────────────────────┐  │
-│  │ IPC Server (server.py)    │  │  ← 请求/响应 + 推送
-│  │ Task Manager              │  │  ← 状态机引擎
-│  │ Cline Executor            │  │  ← 异步 spawn, stall 监控
-│  │ Recovery 模块             │  │  ← 重启恢复
-│  │ Watchdog (60s)            │  │  ← 僵尸进程检测
-│  │ Janitor (每小时)          │  │  ← 清理过期任务
-│  │ Safety Guard              │  │  ← 危险命令拦截
-│  │ Budget Tracker            │  │  ← 预算控制
-│  └───────────────────────────┘  │
-│  SQLite (state.sqlite)          │
-└───────────┬─────────────────────┘
-            │ 子进程管理
-┌───────────▼─────────────────────┐
-│  Cline CLI (node)               │  ← DeepSeek 等模型执行代码
-│  ├─ 训练脚本 (fork)             │  ← 后台训练，独立于 Cline
-│  └─ 测试/数据处理               │
-└─────────────────────────────────┘
+```text
+Planner: Codex / another reasoning agent
+              │
+              │ goals, review, next-step decisions
+              ▼
+        Agent Hub daemon
+   persistence · watchdog · recovery
+              │
+              │ bounded execution
+              ▼
+Executor: Cline CLI / DeepSeek
+              │
+              └── tests, builds, training processes
 ```
 
-### 状态机
+The planner is invoked only when a decision is needed. Waiting, process checks, log monitoring, retries, and state persistence do not require an LLM call.
 
-```
-QUEUED → CLINE_STARTING → CLINE_RUNNING → CLINE_SUCCEEDED
-                ↑              ↓    ↓
-                │    CLINE_FAILED    CLINE_STALLED
-                │         ↓              ↓
-                └─── retry loop ─────────┘
-```
+## What is implemented
 
----
+- SQLite-backed tasks, goals, events, transitions, and budgets.
+- Cline process spawning with stall detection, bounded retries, and process-group cancellation.
+- Recovery that reattaches to live work after daemon restart without blindly relaunching it.
+- Training-process monitoring and result packaging.
+- Goal orchestration with a planner/executor loop.
+- Local JSON-Lines IPC over `127.0.0.1:19876`.
+- A stdlib-only CLI client.
+- A VS Code sidebar for goals, tasks, live output, cancellation, and daemon status.
+- Safety controls for network access, protected paths, forbidden commands, and execution time.
+- Mock mode for deterministic demonstrations and tests.
 
-## 快速开始
+## Five-minute demo
 
-### 1. 启动守护进程
+This demo does not require a live Cline or Codex account.
 
 ```bash
-cd /path/to/Codex_Cline
-PYTHONPATH="$PWD/agentd" AGENT_HUB_CONFIG="$PWD/config.yaml" \
-  nohup python -B -u -m agent_hub.main \
-  >> .agent-hub/logs/agentd.spawn.log 2>&1 &
+git clone https://github.com/dzrdzrdzr/Agent-Hub.git
+cd Agent-Hub
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "./agentd[dev]"
+
+cp config.test.yaml config.local.yaml
+export AGENT_HUB_CONFIG="$PWD/config.local.yaml"
+
+agent-hub-daemon
 ```
 
-### 2. 提交任务（任意终端）
+Keep the daemon running and open a second terminal:
 
 ```bash
-# 验证 daemon 存活
-python3 scripts/agent-hub.py ping
-
-# 提交任务；未写 --cwd 时自动使用调用命令所在目录
-python3 scripts/agent-hub.py submit "你的 prompt（越具体越好）"
-
-# 从任意项目目录启动一个 GOAL
-python3 /path/to/Codex_Cline/scripts/agent-hub.py goal "完成当前项目的测试修复"
-
-# 5. 删除已完成的目标（清理数据库和日志）
-python3 scripts/agent-hub.py delete-goal <goal-id>
-
-# 查看状态
-python3 scripts/agent-hub.py status
-
-# 查看输出
-python3 scripts/agent-hub.py log <task-id>
-
-# 取消任务
-python3 scripts/agent-hub.py cancel <task-id>
+source .venv/bin/activate
+agent-hub ping
+agent-hub goal "Create a deterministic mock task and complete it"
+agent-hub status
 ```
 
-### 3. VS Code 扩展（可选）
+Runtime state is written under `.agent-hub/`, which is ignored by Git.
 
-安装扩展后，侧边栏直接操作，无需手动敲命令。任务和 GOAL 会携带当前
-VS Code workspace 的绝对目录；daemon 可以运行在 Agent Hub 自己的目录，
-实际 Cline 子进程会在目标项目目录执行。VSIX 内含 daemon 源码，因此从其他
-工程首次打开时也能自动启动；开发时可用 `agentHub.daemonRoot` 指定本仓库。
+## Real executor setup
 
----
+Prerequisites:
 
-## 项目结构
+- Python 3.10 or newer;
+- Cline CLI available on `PATH`, or an absolute path in `config.local.yaml`;
+- Codex CLI when using planner-driven goals;
+- Linux or WSL is the primary tested daemon environment;
+- VS Code Remote SSH is supported by the bundled extension workflow.
 
-```
-Codex_Cline/
-  agentd/              Python 守护进程 (agent_hub)
-    agent_hub/
-      main.py          入口，主循环 + watchdog + janitor
-      server.py        IPC server (TCP JSON-Lines)
-      task_manager.py  状态机引擎
-      cline_executor.py Cline 子进程管理 + stall 监控
-      recovery.py      重启恢复逻辑
-      process_watcher.py 进程身份验证（加权匹配）
-      safety_guard.py  危险命令拦截
-      budget_tracker.py 预算控制
-      db.py            SQLite 数据层
-      config.py        配置加载
-    tests/             9 个测试，全部通过
-  extension/           VS Code 扩展 (TypeScript)
-  scripts/
-    agent-hub.py       CLI 客户端 (stdlib only)
-  config.yaml          守护进程配置
-  DESIGN.md            系统设计文档
+Install:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "./agentd[dev]"
+
+agent-hub init --path config.local.yaml
+export AGENT_HUB_CONFIG="$PWD/config.local.yaml"
 ```
 
----
+Review `config.local.yaml`, then start the daemon from the repository root:
 
-## 配置 (config.yaml)
+```bash
+agent-hub-daemon
+```
+
+Verify and submit work:
+
+```bash
+agent-hub ping
+agent-hub submit "Run the test suite, fix the first real failure, and report changed files"
+agent-hub status
+```
+
+Start a multi-step goal:
+
+```bash
+agent-hub goal \
+  "Make the current project pass its tests without weakening assertions" \
+  --completion-criteria "All existing tests pass" \
+  --stop-conditions "Stop after three failed iterations" \
+  --max-iterations 6 \
+  --max-failures 3
+```
+
+## CLI
+
+| Command | Purpose |
+| --- | --- |
+| `agent-hub init` | Write a safe local configuration template |
+| `agent-hub ping` | Check daemon availability |
+| `agent-hub submit "prompt"` | Delegate one executor task |
+| `agent-hub goal "objective"` | Start a planner/executor goal |
+| `agent-hub status` | List current tasks |
+| `agent-hub log TASK_ID` | Read task output |
+| `agent-hub cancel TASK_ID` | Cancel a task and its process group |
+| `agent-hub delete-goal GOAL_ID` | Remove a completed goal and related records |
+
+Use `--json` for machine-readable output.
+
+## VS Code extension
+
+The extension bundles the daemon source and can start it automatically. It provides:
+
+- separate **Goals** and **Tasks** views;
+- live task output;
+- daemon status and logs;
+- submit, cancel, retry, delete, and refresh commands;
+- an extension API for other planner tools.
+
+Build a development VSIX:
+
+```bash
+cd extension
+npm ci
+npm run package
+```
+
+The generated package can be installed with **Extensions: Install from VSIX...**.
+
+## Configuration
+
+The repository's `config.yaml` is a safe, generic baseline. Keep machine-specific paths and environment variables in an ignored `config.local.yaml`.
 
 ```yaml
 agentd:
+  ipc:
+    transport: tcp
+    tcp_host: 127.0.0.1
+    tcp_port: 19876
   cline:
-    kill_on_shutdown: false     # daemon 退出不杀 Cline（默认）
+    executable: auto
+    timeout_seconds: 600
     stall_threshold_seconds: 300
     max_retries: 1
-    retention_days: 30
+    env: {}
+    kill_on_shutdown: false
   safety:
-    allow_network: false        # 默认禁止 Cline 访问网络
+    allow_network: false
+    protected_paths: []
+    forbidden_commands: []
+    max_execution_time_seconds: 3600
 ```
 
-完整配置见 `config.yaml`。
-
----
-
-## 运行测试
+Point the daemon to a custom file with:
 
 ```bash
-cd agentd/
-PATH="/path/to/cline/bin:$PATH" python -m pytest tests/ -v -p no:dash
-# 预期: 9 passed
+export AGENT_HUB_CONFIG="$PWD/config.local.yaml"
 ```
 
----
+## Safety model
 
-## 设计原则
+Agent Hub runs tools on the local machine and should be treated like any other automation runner.
 
-- **零模型调用用于机械检查**——PID、退出码、日志轮询不消耗 token
-- **进程组终止**——杀任务时连带所有子进程
-- **加权进程身份**——env var > cmdline tail > start_time，不因 shebang 脚本误判
-- **per-task 锁**——spawn/exit/stall/stop 持锁执行，消除竞态
-- **原子 SQLite 写入**——状态变更使用事务
-- **并发 TCP 推送**——慢客户端超时 2s 自动驱逐
-- **不重复启动同一任务**——双重启动保护
+Defaults are deliberately conservative:
 
----
+- IPC binds to loopback;
+- network access is disabled in the safety policy;
+- task execution has a time limit;
+- daemon shutdown does not automatically kill independent executor/training processes;
+- credentials should remain in the provider's own configuration, not this repository;
+- local state, logs, `.env`, and `config.local.yaml` are ignored.
 
-## 许可
+Before allowing an agent to modify a valuable workspace, configure `protected_paths`, `forbidden_commands`, version control, and backups. See [SECURITY.md](SECURITY.md).
 
-MIT
+## Development
+
+Run daemon tests:
+
+```bash
+python -m pip install -e "./agentd[dev]"
+AGENT_HUB_CONFIG="$PWD/config.test.yaml" pytest agentd/tests -q
+```
+
+Compile the extension:
+
+```bash
+cd extension
+npm ci
+npm run compile
+```
+
+Or use:
+
+```bash
+make test
+```
+
+CI tests Python 3.10–3.12, compiles the VS Code extension, and performs a VSIX packaging smoke test.
+
+## Repository layout
+
+```text
+Agent-Hub/
+├── agentd/                 Python daemon package
+│   ├── agent_hub/          state, recovery, execution and orchestration
+│   └── tests/
+├── extension/              VS Code extension
+├── scripts/                bootstrap and compatibility CLI wrapper
+├── config.yaml             safe default configuration
+├── config.test.yaml        deterministic mock configuration
+├── AGENTS.md               protocol and agent integration notes
+└── DESIGN.md               detailed architecture
+```
+
+## Scope
+
+Agent Hub does not guarantee that an executor will produce correct code. It provides operational control: persistence, observability, recovery, bounded retries, and a clean planner/executor boundary.
+
+Contributions should preserve those invariants and include tests for process lifecycle or state changes. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+If this solves a real unattended-agent workflow, starring the repository makes the project easier for other users to discover.
