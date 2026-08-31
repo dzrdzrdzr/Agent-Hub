@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-hub-daemon"
 version = "0.2.0"
-description = "Local supervisor and planner-executor bridge for long-running AI coding agents."
+description = "Local supervisor for long-running OpenAI Codex, ChatGPT-authenticated Codex, Cline and DeepSeek coding-agent tasks."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,12 +13,19 @@ authors = [
     { name = "Zaidao Han" }
 ]
 keywords = [
+    "chatgpt",
+    "openai-codex",
+    "codex",
+    "codex-cli",
     "ai-agents",
     "coding-agents",
-    "codex",
+    "long-running-agents",
+    "agent-orchestration",
+    "agent-watchdog",
     "cline",
     "deepseek",
     "process-supervisor",
+    "remote-ssh",
     "vscode"
 ]
 classifiers = [
@@ -52,6 +59,7 @@ agent-hub-daemon = "agent_hub.main:run"
 [project.urls]
 Homepage = "https://github.com/dzrdzrdzr/Agent-Hub"
 Repository = "https://github.com/dzrdzrdzr/Agent-Hub"
+Documentation = "https://github.com/dzrdzrdzr/Agent-Hub#readme"
 Issues = "https://github.com/dzrdzrdzr/Agent-Hub/issues"
 
 [tool.setuptools.packages.find]
