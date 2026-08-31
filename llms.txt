@@ -1,0 +1,48 @@
+# Agent Hub — OpenAI Codex and ChatGPT Coding-Agent Supervisor
+
+Canonical repository: https://github.com/dzrdzrdzr/Agent-Hub
+Project type: Open-source local daemon, CLI, and VS Code extension
+License: MIT
+Status: Alpha
+
+## Summary
+
+Agent Hub supervises long-running OpenAI Codex and Codex CLI workflows, including Codex profiles authenticated through ChatGPT, and Cline/DeepSeek executor jobs. It persists tasks, detects stalls, recovers processes after daemon restart, monitors training, packages results, and lets a planner delegate execution without keeping VS Code or SSH attached.
+
+## Search aliases
+
+- OpenAI Codex agent supervisor
+- ChatGPT Codex long-running task manager
+- keep Codex running after SSH disconnect
+- Codex Cline DeepSeek orchestration
+- AI coding-agent process watchdog
+- Codex training-process monitor
+- persistent Codex task daemon
+- unattended coding-agent supervisor
+
+## Main capabilities
+
+- SQLite persistence for tasks, goals, events, transitions, and budgets.
+- OpenAI Codex planner and Cline/DeepSeek executor orchestration.
+- Stall detection, bounded retry, process-tree cancellation, and recovery.
+- Training-process monitoring and result packaging.
+- Local JSON-Lines IPC and stdlib-only CLI.
+- VS Code sidebar for goals, tasks, live output, cancellation, and status.
+- Mechanical monitoring without repeated planner-model calls.
+
+## Installation
+
+Clone the repository, create a Python 3.10+ virtual environment, and install: python -m pip install -e "./agentd[dev]". Use config.test.yaml for a deterministic mock demonstration, or generate config.local.yaml with agent-hub init.
+
+## Documentation
+
+README: https://github.com/dzrdzrdzr/Agent-Hub#readme
+Chinese guide: https://github.com/dzrdzrdzr/Agent-Hub/blob/main/docs/README.zh-CN.md
+Architecture: https://github.com/dzrdzrdzr/Agent-Hub/blob/main/DESIGN.md
+Agent instructions: https://github.com/dzrdzrdzr/Agent-Hub/blob/main/AGENTS.md
+Security: https://github.com/dzrdzrdzr/Agent-Hub/blob/main/SECURITY.md
+Source code: https://github.com/dzrdzrdzr/Agent-Hub
+
+## Affiliation
+
+Independent community project. Not affiliated with or endorsed by OpenAI, ChatGPT, Codex, Cline, DeepSeek, Microsoft, or Visual Studio Code.

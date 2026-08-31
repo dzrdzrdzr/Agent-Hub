@@ -1,7 +1,7 @@
 {
   "name": "agent-hub",
   "displayName": "Agent Hub — AI Agent Supervisor",
-  "description": "Persist, monitor, recover, and control long-running Codex/Cline coding-agent tasks from VS Code.",
+  "description": "Supervise long-running OpenAI Codex and ChatGPT-authenticated Codex jobs, plus Cline/DeepSeek executors, with persistence, recovery, and VS Code control.",
   "version": "0.2.8",
   "publisher": "agenthub",
   "license": "MIT",
@@ -15,12 +15,20 @@
     "url": "https://github.com/dzrdzrdzr/Agent-Hub/issues"
   },
   "keywords": [
+    "chatgpt",
+    "chatgpt codex",
+    "openai codex",
+    "codex cli",
+    "vscode codex",
     "ai agents",
     "coding agents",
+    "agent orchestration",
+    "long running agents",
     "codex",
     "cline",
     "deepseek",
     "process supervisor",
+    "agent watchdog",
     "remote ssh"
   ],
   "categories": [

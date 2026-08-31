@@ -1,0 +1,10 @@
+# Agent Hub — OpenAI Codex and ChatGPT Coding-Agent Supervisor
+
+Canonical page: https://dzrdzrdzr.github.io/Agent-Hub/
+Canonical source: https://github.com/dzrdzrdzr/Agent-Hub
+
+A local daemon, CLI, and VS Code extension for supervising long-running OpenAI Codex / Codex CLI workflows, including ChatGPT-authenticated Codex profiles, and Cline/DeepSeek executor tasks. Provides persistence, stall detection, recovery, process monitoring, training monitoring, and planner/executor orchestration.
+
+Search aliases: OpenAI Codex agent supervisor; ChatGPT Codex task manager; keep Codex running after SSH disconnect; Codex Cline DeepSeek orchestration; AI coding-agent watchdog; persistent Codex task daemon.
+
+Independent community project; not affiliated with OpenAI, ChatGPT, Codex, Cline, DeepSeek, Microsoft, or Visual Studio Code.

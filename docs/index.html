@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Hub | OpenAI Codex and ChatGPT Coding-Agent Supervisor</title>
+  <meta name="description" content="Supervise long-running OpenAI Codex, ChatGPT-authenticated Codex, Cline and DeepSeek coding-agent jobs with persistence, stall detection, recovery, training monitoring, and VS Code control.">
+  <meta name="keywords" content="OpenAI Codex, ChatGPT Codex, Codex CLI, coding agent supervisor, Cline, DeepSeek, agent orchestration, process watchdog, Remote SSH, long-running AI agents">
+  <meta name="robots" content="index,follow,max-snippet:-1,max-image-preview:large">
+  <link rel="canonical" href="https://dzrdzrdzr.github.io/Agent-Hub/">
+  <link rel="sitemap" type="application/xml" href="sitemap.xml">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Agent Hub — OpenAI Codex and ChatGPT Coding-Agent Supervisor">
+  <meta property="og:description" content="Keep Codex, Cline, DeepSeek, tests, builds, and training jobs observable and recoverable after VS Code or SSH disconnects.">
+  <meta property="og:url" content="https://dzrdzrdzr.github.io/Agent-Hub/">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Agent Hub",
+    "alternateName": [
+      "OpenAI Codex Agent Supervisor",
+      "ChatGPT Codex Task Supervisor",
+      "Codex Cline DeepSeek Orchestrator"
+    ],
+    "description": "A local daemon, CLI, and VS Code extension that supervises long-running OpenAI Codex, ChatGPT-authenticated Codex, Cline, and DeepSeek coding-agent tasks with persistence, recovery, and process monitoring.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Linux, WSL, VS Code Remote SSH",
+    "softwareRequirements": "Python 3.10 or newer; optional OpenAI Codex CLI and Cline CLI",
+    "url": "https://dzrdzrdzr.github.io/Agent-Hub/",
+    "codeRepository": "https://github.com/dzrdzrdzr/Agent-Hub",
+    "license": "https://opensource.org/license/mit",
+    "keywords": "OpenAI Codex, ChatGPT Codex, Codex CLI, Cline, DeepSeek, coding agents, process supervisor, Remote SSH",
+    "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+  }
+  </script>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #eef2ff; line-height: 1.65; }
+    main { max-width: 940px; margin: auto; padding: 56px 24px 80px; }
+    h1 { font-size: clamp(2.2rem, 6vw, 4.5rem); line-height: 1.05; margin: 0 0 20px; }
+    h2 { margin-top: 48px; }
+    a { color: #80bfff; }
+    .lead { font-size: 1.23rem; color: #c7d2fe; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0; }
+    .button { display: inline-block; padding: 11px 16px; border: 1px solid #80bfff; border-radius: 9px; text-decoration: none; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+    .card { padding: 18px; border: 1px solid #303b66; border-radius: 12px; background: #121a32; }
+    pre { padding: 16px; overflow: auto; background: #10172a; border-radius: 8px; }
+    footer { margin-top: 56px; color: #9aa7c7; font-size: .95rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Agent Hub</h1>
+  <p class="lead">A local supervisor for long-running OpenAI Codex and Codex CLI jobs—including Codex profiles authenticated through ChatGPT—and for Cline/DeepSeek executors.</p>
+  <div class="actions">
+    <a class="button" href="https://github.com/dzrdzrdzr/Agent-Hub">View source</a>
+    <a class="button" href="https://github.com/dzrdzrdzr/Agent-Hub#five-minute-demo">Run the mock demo</a>
+    <a class="button" href="https://github.com/dzrdzrdzr/Agent-Hub/blob/main/docs/README.zh-CN.md">中文说明</a>
+  </div>
+
+  <h2>What does Agent Hub supervise?</h2>
+  <div class="grid">
+    <section class="card"><h3>OpenAI Codex planning</h3><p>Invoke Codex only when a goal needs planning, review, or a next-step decision.</p></section>
+    <section class="card"><h3>Cline and DeepSeek execution</h3><p>Delegate bounded edits, tests, builds, and long-running work to the configured executor.</p></section>
+    <section class="card"><h3>Processes and training</h3><p>Persist state, detect stalls, recover after restart, and monitor child processes without model polling.</p></section>
+  </div>
+
+  <h2>Planner and executor architecture</h2>
+  <pre><code>OpenAI Codex / Codex CLI
+          | plans and reviews
+          v
+     Agent Hub daemon
+ persistence | watchdog | recovery
+          |
+          v
+ Cline / DeepSeek executor
+ tests | builds | training</code></pre>
+
+  <h2>Frequently asked questions</h2>
+  <h3>How do I keep Codex running after VS Code or SSH disconnects?</h3>
+  <p>Agent Hub tracks tasks through a local daemon. Executor and training processes can continue independently, and recovery can reattach after restart.</p>
+  <h3>Can it work with a Codex profile authenticated through ChatGPT?</h3>
+  <p>Yes. Agent Hub launches the installed Codex CLI and leaves authentication in Codex's own provider profile.</p>
+  <h3>Does monitoring consume OpenAI Codex or DeepSeek tokens?</h3>
+  <p>Mechanical checks use local process state, SQLite records, exit codes, timestamps, and logs. The planner is called only when judgment is required.</p>
+
+  <h2>Canonical resources</h2>
+  <p><a href="https://github.com/dzrdzrdzr/Agent-Hub">GitHub repository</a> · <a href="https://github.com/dzrdzrdzr/Agent-Hub/blob/main/AGENTS.md">Codex integration instructions</a> · <a href="llms.txt">Machine-readable summary</a> · <a href="https://github.com/dzrdzrdzr/Agent-Hub/blob/main/SECURITY.md">Security</a></p>
+
+  <footer>Independent community project. Not affiliated with or endorsed by OpenAI, ChatGPT, Codex, Cline, DeepSeek, Microsoft, or Visual Studio Code.</footer>
+</main>
+</body>
+</html>
